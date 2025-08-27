@@ -1,16 +1,17 @@
 name: Windows
 
+# WARNING: Don't merge changes to this file into main branch
+
 on:
   push:
    # tirgger on pushes to main branch except when only documentation is changed
     branches:
-      - main
+      - '*'
     paths-ignore:
       - '**.md'
    
 
 jobs:
-
   build-windows:
     runs-on: windows-latest
     permissions:
@@ -34,12 +35,16 @@ jobs:
       run: |
         cd ../..
         git clone https://github.com/open-ephys/plugin-GUI.git --branch main
-        cd plugin-GUI/Build
+        cd plugin-GUI 
+        gh pr checkout 670
+        cd Build
         cmake -G "Visual Studio 17 2022" -A x64 .. 
         mkdir Release && cd Release
-        curl -L https://openephys.jfrog.io/artifactory/GUI-binaries/Libraries/open-ephys-lib-v1.0.0.zip --output open-ephys-lib.zip
-        unzip open-ephys-lib.zip
+        curl -L https://github.com/d1manson/open-ephys-main/releases/download/d728c1b2a/open-ephys-windows.zip --output open-ephys-windows.zip
+        unzip -qq -j open-ephys-windows.zip "open-ephys\\open-ephys.lib"
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
     - name: Add msbuild to PATH
       uses: microsoft/setup-msbuild@v2
     - name: configure
