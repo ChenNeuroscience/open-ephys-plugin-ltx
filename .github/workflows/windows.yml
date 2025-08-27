@@ -4,7 +4,7 @@ on:
   push:
    # tirgger on pushes to main branch except when only documentation is changed
     branches:
-      - main
+      - '*'
     paths-ignore:
       - '**.md'
    
@@ -34,6 +34,7 @@ jobs:
       run: |
         cd ../..
         git clone https://github.com/open-ephys/plugin-GUI.git --branch main
+        gh pr checkout 670  # WARNING: this line should be removed if and when the PR is merged into main
         cd plugin-GUI/Build
         cmake -G "Visual Studio 17 2022" -A x64 .. 
         mkdir Release && cd Release
