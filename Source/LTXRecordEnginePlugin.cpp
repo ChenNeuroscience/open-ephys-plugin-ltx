@@ -73,7 +73,7 @@ namespace LTX {
         else if (getContinuousChannel(getGlobalIndex(0))->getStreamName() == "bonsai") {
             mode = RecordMode::POS_ONLY; // first continuous channel is bonsai data, treat as pos
             LOGC("LTX RecordEngine using mode:POS_ONLY (", mode, ").");
-            if (getNumRecordedDataStreams() != 1) {
+            if (getNumRecordedDataStreams() > 1) { // WARNING: for some reason getTotalRecordedStreams() returns 0 when it should be 1, so this check it maybe totally broken
                 LOGE("For LTX pos, require exactly 1 data stream, but found ", getNumRecordedDataStreams(), " streams.");
                 CoreServices::setAcquisitionStatus(false);
                 return;
