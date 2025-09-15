@@ -1,5 +1,7 @@
-# Open Ephys (v1) Plugin - LTX Record Engine
+# Open Ephys (v1*) Plugin - LTX Record Engine
 
+*Currently this requires a fork of v1.0.1 OE. The fork is available for windows [here](https://github.com/d1manson/open-ephys-main/releases/tag/d728c1b2a).
+ 
 The LTX format is broadly compatible with **L**egacy analysis code used with **T**etrode recordings in various rodent labs. However it is _not_ e**X**plicitly defined.
 Amongst other pre-existing tools, the LTX files should be viewable within the [Waveform GUI](https://github.com/d1manson/waveform).
 
