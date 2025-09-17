@@ -45,7 +45,7 @@ namespace LTX {
     constexpr int oeSampsPerSpike = 40; // seems to be hard-coded as 8+32 = 40
     constexpr int posTimestampChannel = 0; // provided by the bonsai source plugin
     constexpr int posNaN = 1023; // when writing pos data as uint16s, if we encounter a NaN in the source float data, we write this value.
-    constexpr char* ignore_stream_named = "memory_usage";
+    constexpr char* ignore_stream_prefixed = "memory_usage";
 
     RecordEnginePlugin::RecordEnginePlugin() {}
 
@@ -84,13 +84,13 @@ namespace LTX {
             LOGC("LTX RecordEngine using mode:EEG_ONLY (", mode, ").");
             size_t n_streams = 0;
             for (auto stream : getDataStreams()) {
-                if (stream->getName() == ignore_stream_named) {
+                if (stream->getName().startsWith(ignore_stream_prefixed)) {
                     continue;
                 }
                 n_streams++;
             }
             if (n_streams != 1) {
-                LOGE("For LTX eeg, require exactly 1 data stream (excluding a '", ignore_stream_named, "', but found ", n_streams, " streams.");
+                LOGE("For LTX eeg, require exactly 1 data stream (excluding a '", ignore_stream_prefixed, "', but found ", n_streams, " streams.");
                 CoreServices::setAcquisitionStatus(false);
                 return;
             }
@@ -160,7 +160,7 @@ namespace LTX {
             for (int i = 0; i < getNumRecordedContinuousChannels(); i++) {
                 // important check before we get going...
                 const ContinuousChannel* channel = getContinuousChannel(getGlobalIndex(i));
-                if (channel->getStreamName() == ignore_stream_named) {
+                if (channel->getStreamName().startsWith(ignore_stream_prefixed)) {
                     continue;
                 }
                 if (channel->getSampleRate() != eegInputSampRate) {
@@ -280,7 +280,7 @@ namespace LTX {
         }
 
         if (mode == RecordMode::EEG_ONLY) {
-            if (getContinuousChannel(realChannel)->getStreamName() == ignore_stream_named) {
+            if (getContinuousChannel(realChannel)->getStreamName().startsWith(ignore_stream_prefixed)) {
                 return;
             }
             // no timestamps written in the EEG file at all
@@ -401,7 +401,7 @@ namespace LTX {
         double timestamp,
         String text)
     {
-        if (stream == nullptr || stream->getName() == ignore_stream_named) {
+        if (stream == nullptr || stream->getName().startsWith(ignore_stream_prefixed)) {
             return;
         }
         if (startingTimestamp != TIMESTAMP_UNINITIALIZED) {
