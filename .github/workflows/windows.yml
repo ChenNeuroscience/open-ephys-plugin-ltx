@@ -16,7 +16,8 @@ on:
 jobs:
 
   build-windows:
-    runs-on: windows-latest
+    # Match the VS 2022 toolchain used by the pinned GUI import library.
+    runs-on: windows-2022
     permissions:
       contents: write
     steps:
