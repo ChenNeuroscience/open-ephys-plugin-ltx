@@ -3,11 +3,13 @@
 #include "LTXRecordEnginePlugin.h" // only needed for LOG* methods
 #include <cstring>
 #include <cstdio>
+#include <cerrno>
+#include <stdexcept>
 
 namespace LTX {
-	constexpr char* data_start_token = "\r\ndata_start";
-	constexpr char* data_end_token = "\r\ndata_end";
-	constexpr char* placeholder_token = "              ";
+	constexpr const char* data_start_token = "\r\ndata_start";
+	constexpr const char* data_end_token = "\r\ndata_end";
+	constexpr const char* placeholder_token = "              ";
 
 	LTXFile::LTXFile(const std::string& basePath, const std::string& extension, std::chrono::system_clock::time_point start_tm_):
 		start_tm(start_tm_) 
@@ -19,6 +21,7 @@ namespace LTX {
 		LOGC("Opening file: ", fullpath);
 		
 		theFile = fopen(fullpath.c_str(), "wb");
+		if (!theFile) throw std::runtime_error("Cannot open LTX file " + fullpath + ": " + std::strerror(errno));
 
 		// headers: trial date and time
 		std::time_t start_tm_t = std::chrono::system_clock::to_time_t(start_tm);
@@ -31,7 +34,7 @@ namespace LTX {
 		fprintf(theFile, "\r\ntrial_time %s", strftime_output);
 
 		// headers: hard-coded values
-		fprintf(theFile, "\r\ncreated_by open-ephys-plugin-ltx 1.0.0");
+		fprintf(theFile, "\r\ncreated_by open-ephys-plugin-ltx 1.1.0");
 
 		// headers: placeholder for duration
 		fprintf(theFile, "\r\nduration %s", placeholder_token);
@@ -93,7 +96,7 @@ namespace LTX {
 			status = FileWriteStatus::EPILOGUE;
 		} else if (status == FileWriteStatus::BINARY) {
 			status = FileWriteStatus::EPILOGUE;
-			fprintf(theFile, data_end_token);
+			fprintf(theFile, "%s", data_end_token);
 		}
 
 		if (status != FileWriteStatus::EPILOGUE) {
@@ -111,7 +114,7 @@ namespace LTX {
 		
 		// todo: maybe should check the string is less than the length of the placeholder?
 
-		fprintf(theFile, oss.str().c_str());
+		fprintf(theFile, "%s", oss.str().c_str());
 
 		headerOffsetCustom = 0;
 	}
@@ -124,7 +127,7 @@ namespace LTX {
 
 		if (status == FileWriteStatus::HEADERS) {
 			status = FileWriteStatus::BINARY;
-			fprintf(theFile, data_start_token);
+			fprintf(theFile, "%s", data_start_token);
 		}
 
 		if (status != FileWriteStatus::BINARY) {
@@ -132,7 +135,8 @@ namespace LTX {
 			return;
 		}
 
-		fwrite(buffer, 1, totalBytes, theFile);
+		if (fwrite(buffer, 1, totalBytes, theFile) != totalBytes)
+			throw std::runtime_error("Failed writing LTX binary data");
 	}
 
 
@@ -146,7 +150,7 @@ namespace LTX {
 		}
 
 		if (status == FileWriteStatus::BINARY) {
-			fprintf(theFile, data_end_token);
+			fprintf(theFile, "%s", data_end_token);
 		}
 
 		status = FileWriteStatus::CLOSED;
@@ -154,7 +158,7 @@ namespace LTX {
 		// finalise the duration header
 		fseek(theFile, headerOffsetDuration, SEEK_SET);
 		std::chrono::seconds durationSeconds = std::chrono::duration_cast<std::chrono::seconds>(end_tm - start_tm);
-		fprintf(theFile, "%lld", durationSeconds.count());
+		fprintf(theFile, "%lld", static_cast<long long>(durationSeconds.count()));
 
 		fclose(theFile);
 	}
