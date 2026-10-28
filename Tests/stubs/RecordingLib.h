@@ -2,6 +2,7 @@
 // Small API substitute for executing the production record engine in tests.
 // The real GUI headers are checked separately with run_tests.py --gui-source.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -49,9 +50,37 @@ struct RecordNode : OtherBase, GenericProcessor {};
 class DataStream {
     String name;
 public:
-    DataStream(const char* name_): name(name_) {}
+    DataStream(const char* name_, int id_ = 1): name(name_), id(id_) {}
     String getName() const { return name; }
+    int id;
+    int getStreamId() const { return id; }
+    struct Field;
+    std::vector<std::shared_ptr<Field>> metadata;
+    int findMetadata(int type, unsigned int length, String identifier) const;
+    const Field* getMetadataValue(int index) const { return metadata.at(index).get(); }
+    template <class T> void add(int type, const char* name, const T* values, size_t count);
 };
+struct MetadataDescriptor { enum MetadataType { DOUBLE, INT32, CHAR }; };
+struct DataStream::Field {
+    int type;
+    std::string name;
+    unsigned int count;
+    std::vector<unsigned char> bytes;
+    template <class T> void getValue(T& value) const { std::memcpy(&value, bytes.data(), sizeof(T)); }
+    template <class T> void getValue(T* values) const { std::memcpy(values, bytes.data(), bytes.size()); }
+};
+inline int DataStream::findMetadata(int type, unsigned int length, String identifier) const {
+    for (size_t i = 0; i < metadata.size(); ++i)
+        if (metadata[i]->type == type && metadata[i]->count == length && metadata[i]->name == identifier.toStdString()) return int(i);
+    return -1;
+}
+template <class T> void DataStream::add(int type, const char* name, const T* values, size_t count) {
+    auto field = std::make_shared<Field>();
+    field->type = type; field->name = name; field->count = unsigned(count);
+    field->bytes.resize(sizeof(T) * count);
+    std::memcpy(field->bytes.data(), values, field->bytes.size());
+    metadata.push_back(field);
+}
 class ContinuousChannel {
     String stream;
     float rate;
@@ -60,6 +89,7 @@ public:
     String getStreamName() const { return stream; }
     String getName() const { return "test-channel"; }
     float getSampleRate() const { return rate; }
+    int getStreamId() const { return 1; }
 };
 struct SpikeChannel {
     int getNumChannels() const { return 4; }
@@ -111,6 +141,7 @@ public:
     std::vector<ContinuousChannel> testChannels;
     std::vector<DataStream> testStreams;
     std::vector<int> testChannelMap;
+    int testRecordedStreams = -1;
     int testSpikeChannels = 0;
     int testEventChannels = 0;
 protected:
@@ -118,7 +149,7 @@ protected:
     int getNumRecordedSpikeChannels() const { return testSpikeChannels; }
     int getNumRecordedContinuousChannels() const { return int(testChannelMap.size()); }
     int getNumRecordedEventChannels() const { return testEventChannels; }
-    int getNumRecordedDataStreams() const { return int(testStreams.size()); }
+    int getNumRecordedDataStreams() const { return testRecordedStreams >= 0 ? testRecordedStreams : int(testStreams.size()); }
     int getGlobalIndex(int index) const { return testChannelMap.at(index); }
     const ContinuousChannel* getContinuousChannel(int index) const { return &testChannels.at(index); }
     std::vector<const DataStream*> getDataStreams() const {

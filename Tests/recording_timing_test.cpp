@@ -118,11 +118,6 @@ static void coordinatorTests() {
     assert(session.snapshot().delaySeconds(3) == 0.4);
     assert(session.takeWarnings().size() == 2);
     assert(session.takeWarnings().empty());
-    assert(paddingSamples(0.397, 50) == 20);
-    assert(paddingSamples(0.4, 5000) == 2000);
-    bool rejected = false;
-    try { paddingSamples(std::nan(""), 50); } catch (const std::runtime_error&) { rejected = true; }
-    assert(rejected);
     Session concurrent({1, 2});
     concurrent.claim(1, "eeg"); concurrent.claim(2, "position");
     std::thread a([&] { concurrent.publish(2, epochMs); });
@@ -135,6 +130,7 @@ static void missingAnchor(const std::filesystem::path& root) {
     const auto folder = root / "missing-anchor";
     std::filesystem::create_directories(folder);
     CoreServices::recordingName = "missing-anchor";
+    CoreServices::messages.clear();
     CoreServices::stopRequests = 0;
     RecordNode node;
     CoreServices::nodes = {{10, &node}};
@@ -142,9 +138,11 @@ static void missingAnchor(const std::filesystem::path& root) {
     configure(engine, node, 0);
     engine.openFiles(File(folder / "node"), 1, 0);
     positionData(engine);
+    DataStream stream("bonsai");
+    engine.writeTimestampSyncText(&stream, 0, 100.0, "Start Time");
     engine.closeFiles();
-    assert(CoreServices::stopRequests > 0);
-    assert(!std::filesystem::exists(folder.string() + ".pos"));
+    assert(CoreServices::stopRequests == 0);
+    assert(!CoreServices::messages.empty());
 }
 
 static void edgeCases(const std::filesystem::path& root) {
@@ -162,20 +160,18 @@ static void edgeCases(const std::filesystem::path& root) {
         if (name == "capacity") {
             const float value = 0;
             const double time = 0;
-            // This must be rejected before either input pointer is copied.
             engine.writeContinuousData(0, 0, &value, &time, 40000000);
         } else if (name != "empty") {
             engine.writeTimestampSyncText(nullptr, epochMs, 0, "Software Time (");
             if (name == "duplicate") engine.writeTimestampSyncText(nullptr, epochMs, 0, "Software Time (");
-            if (name == "missing-participant") {
+            positionData(engine);
+            if (name != "missing-native") {
                 DataStream stream("bonsai");
                 engine.writeTimestampSyncText(&stream, 0, 100.0, "Start Time");
-                positionData(engine);
             }
         }
         engine.closeFiles();
-        assert((CoreServices::stopRequests == 0) == (name == "empty"));
-        assert(!std::filesystem::exists(folder.string() + ".pos"));
+        assert((CoreServices::stopRequests > 0) == (name == "capacity" || name == "missing-native"));
     }
     {
         const auto folder = root / "inactive";
@@ -197,17 +193,147 @@ static void edgeCases(const std::filesystem::path& root) {
         inactive.closeFiles();
         assert(CoreServices::stopRequests == 0);
     }
+    // Diagnostics report any measured discrepancy; no padding limit applies.
     LTX::Timing::Session excessive({1, 2});
     excessive.claim(1, "position"); excessive.claim(2, "eeg");
     excessive.publish(1, epochMs);
     excessive.publish(2, epochMs + 600001);
-    assert(excessive.hasFailed() && !excessive.snapshot().epochMs);
+    assert(!excessive.hasFailed() && excessive.snapshot().epochMs);
+}
+
+static void addCameraMetadata(DataStream& stream, const char* crop, bool uncalibrated = false, bool unknown = false) {
+    const double ppm = uncalibrated ? std::nan("") : 800.0;
+    const int32 window[] = {100, 50, 1540, 1130};
+    const int32 zeroWindow[] = {0, 0, 0, 0};
+    const int32 frame[] = {1920, 1200};
+    char description[128]{};
+    std::strncpy(description, crop, 127);
+    stream.add(MetadataDescriptor::DOUBLE, "camera_tracker.pixels_per_metre", &ppm, 1);
+    stream.add(MetadataDescriptor::INT32, "camera_tracker.window", unknown ? zeroWindow : window, 4);
+    stream.add(MetadataDescriptor::CHAR, "camera_tracker.crop", description, 128);
+    stream.add(MetadataDescriptor::INT32, "camera_tracker.frame_size", frame, 2);
+}
+
+static void cameraScenario(const std::filesystem::path& root, const std::string& name, const char* crop,
+                           bool uncalibrated = false, bool unknown = false) {
+    const auto folder = root / name;
+    std::filesystem::create_directories(folder);
+    CoreServices::recordingName = name;
+    CoreServices::stopRequests = 0;
+    RecordNode node;
+    CoreServices::nodes = {{10, &node}};
+    LTX::RecordEnginePlugin engine;
+    configure(engine, node, 0);
+    addCameraMetadata(engine.testStreams[0], crop, uncalibrated, unknown);
+    // Ensure lookup uses stream identity, rather than taking the first stream.
+    DataStream unrelated("other", 99);
+    const int32 badWindow[] = {0, 0, 10, 10};
+    unrelated.add(MetadataDescriptor::INT32, "camera_tracker.window", badWindow, 4);
+    engine.testStreams.insert(engine.testStreams.begin(), unrelated);
+    // Keep the position validation at one recorded stream; getDataStreams can
+    // include an unrecorded stream in the actual GUI too.
+    engine.testRecordedStreams = 1;
+    engine.openFiles(File(folder / "node"), 1, 0);
+    double times[8];
+    for (int i = 0; i < 8; ++i) times[i] = 100 + i / 50.0;
+    for (int channel = 0; channel < 7; ++channel) {
+        float values[] = {100, 1023, 1539, std::nanf(""), INFINITY, -10, 65536, 0};
+        if (channel == 0) for (int i = 0; i < 8; ++i) values[i] = 12 + i / 50.0f;
+        if (channel == 2 || channel == 4) {
+            values[0] = 50; values[1] = 1023; values[2] = 1129;
+        }
+        if (channel >= 5) {
+            values[0] = 8; values[1] = 70000; values[2] = 65535;
+            values[7] = 0.2f;
+        }
+        engine.writeContinuousData(channel, channel, values, times, 8);
+    }
+    engine.writeTimestampSyncText(nullptr, epochMs, 0, "Software Time (");
+    DataStream stream("bonsai");
+    engine.writeTimestampSyncText(&stream, 0, 100.0, "Start Time");
+    engine.closeFiles();
+    assert(CoreServices::stopRequests == 0);
+}
+
+static void metadataTests() {
+    DataStream legacy("bonsai");
+    assert(!LTX::readCameraMetadata(&legacy).present);
+    DataStream camera("bonsai");
+    addCameraMetadata(camera, "rectangle(cx,cy,w,h,deg) 820 590 1440 1080 17.19");
+    auto metadata = LTX::readCameraMetadata(&camera);
+    assert(metadata.present && metadata.validWindow() && metadata.calibrated());
+    assert(metadata.window[0] == 100 && metadata.frame[0] == 1920 && metadata.ppm == 800);
+    assert(metadata.shape == LTX::CameraMetadata::Shape::Rectangle);
+    assert(metadata.contains(820, 590) && !metadata.contains(100, 50));
+    LTX::PositionEncoding encoding(metadata);
+    assert(encoding.transformed && encoding.coordinate(1023, true) != 1023);
+    assert(encoding.coordinate(INFINITY, true) == 1023);
+    assert(encoding.area(INFINITY) == 0 && encoding.area(70000) == 65535);
+    for (const char* shape : {"circle(cx,cy,r) 820 590 540", "square(cx,cy,w,deg) 820 590 600 45",
+                              "rectangle(cx,cy,w,h,deg) 820 590 600 400 -30", "none()"}) {
+        metadata.cropText = shape;
+        metadata.parseCrop();
+        assert(metadata.shape != LTX::CameraMetadata::Shape::Unknown);
+        assert(metadata.contains(820, 590));
+    }
+    for (const char* invalid : {"", "circle(cx,cy,r) 1 2 -1", "square(cx,cy,w,deg) 1 2 3", "none() junk",
+                              "rectangle(cx,cy,w,h,deg) 1 2 3 4 5 junk", "future_shape()"}) {
+        metadata.cropText = invalid;
+        metadata.parseCrop();
+        assert(metadata.shape == LTX::CameraMetadata::Shape::Unknown);
+    }
+    // A crop already fitting the legacy range is translated without scaling.
+    metadata.window = {1000, 1000, 1600, 1400};
+    LTX::PositionEncoding small(metadata);
+    assert(small.scale == 1 && small.coordinate(1023, true) == 23);
+    assert(small.coordinate(1000, false) == 0 && small.coordinate(1599, true) == 599);
+    // New streams can be uncalibrated and not yet have camera bounds.
+    DataStream unknown("bonsai");
+    addCameraMetadata(unknown, "none()", true, true);
+    metadata = LTX::readCameraMetadata(&unknown);
+    assert(metadata.present && !metadata.validWindow() && !metadata.calibrated());
+}
+
+static void fractionalRate(const std::filesystem::path& root) {
+    const auto folder = root / "fractional-rate";
+    std::filesystem::create_directories(folder);
+    CoreServices::recordingName = "fractional-rate";
+    CoreServices::stopRequests = 0;
+    RecordNode node;
+    CoreServices::nodes = {{10, &node}};
+    LTX::RecordEnginePlugin engine;
+    configure(engine, node, 0);
+    engine.testChannels.clear();
+    for (int i = 0; i < 7; ++i) engine.testChannels.emplace_back("bonsai", 29.97f);
+    addCameraMetadata(engine.testStreams[0], "none()");
+    engine.openFiles(File(folder / "node"), 1, 0);
+    DataStream stream("bonsai");
+    engine.writeTimestampSyncText(&stream, 0, 100.0, "Start Time");
+    // A full block of missing timestamps, followed by real camera times. No
+    // software-time anchor: diagnostics cannot gate either block's data.
+    const float rate = 29.97f;
+    double times[] = {100, 100 + 1.0 / rate};
+    double later[] = {100 + 2.0 / rate, 100 + 3.0 / rate};
+    for (int block = 0; block < 2; ++block) {
+        for (int channel = 0; channel < 7; ++channel) {
+            float values[] = {200, 200};
+            if (channel == 0) {
+                values[0] = block ? 12 + 2 / rate : std::nanf("");
+                values[1] = block ? 12 + 3 / rate : std::nanf("");
+            }
+            engine.writeContinuousData(channel, channel, values, block ? later : times, 2);
+        }
+    }
+    engine.closeFiles();
+    assert(CoreServices::stopRequests == 0);
 }
 
 int main(int argc, char** argv) {
     assert(argc == 2);
     const std::filesystem::path root(argv[1]);
     coordinatorTests();
+    metadataTests();
+    fractionalRate(root);
     std::array<int, 3> order{0, 1, 2};
     int count = 0;
     do {
@@ -220,6 +346,10 @@ int main(int argc, char** argv) {
     scenario(root, "nan-head", {400, 0, 200}, true);
     scenario(root, "repeat", {0, 400, 200}, false, true);
     scenario(root, "threshold", {50, 51, 0});
+    scenario(root, "large-discrepancy", {600001, 0, 200});
+    cameraScenario(root, "camera", "rectangle(cx,cy,w,h,deg) 820 590 1440 1080 17.19");
+    cameraScenario(root, "camera-uncalibrated", "circle(cx,cy,r) 820 590 540", true);
+    cameraScenario(root, "camera-unknown-bounds", "none()", true, true);
     missingAnchor(root);
     edgeCases(root);
     std::cout << "Production record-engine scenarios completed\n";

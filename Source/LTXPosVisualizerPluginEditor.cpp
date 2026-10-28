@@ -45,6 +45,30 @@ PosVisualizerPluginEditor::PosVisualizerPluginEditor(GenericProcessor* p)
     clearButton->addListener(this);
     clearButton->setTooltip("Can only clear display after recording has been stopped.");
     addAndMakeVisible(clearButton.get()); // makes the button a child component of the editor and makes it visible
+    metadataLabel.setBounds(10, 128, 220, 35);
+    metadataLabel.setFont(FontOptions(11.0f));
+    addAndMakeVisible(metadataLabel);
+    refreshMetadataControls();
+}
+
+void PosVisualizerPluginEditor::refreshMetadataControls() {
+    const auto metadata = static_cast<PosVisualizerPlugin*>(getProcessor())->getCameraMetadata();
+    const char* names[] = {"left", "right", "top", "bottom", "ppm"};
+    const int indices[] = {0, 2, 1, 3};
+    for (int i = 0; i < 5; ++i) {
+        auto* control = dynamic_cast<TextBoxParameterEditor*>(getParameterEditor(names[i]));
+        if (!control) continue;
+        control->setEnabled(!metadata->present);
+        if (metadata->present) {
+            const String value = i == 4 ? (metadata->calibrated() ? String(metadata->ppm, 2) : String("uncalibrated"))
+                : (metadata->validWindow() ? String(metadata->window[indices[i]]) : String("unavailable"));
+            control->getValueLabel()->setText(value, dontSendNotification);
+            control->getValueLabel()->setEditable(false, false, false);
+        } else if (metadataControlsLocked) control->updateView();
+    }
+    metadataControlsLocked = metadata->present;
+    metadataLabel.setText(metadata->present ? "Camera metadata (read only)" : "Legacy viewer settings", dontSendNotification);
+    metadataLabel.setTooltip(metadata->present ? String(metadata->cropText) : String("Used when the stream supplies no camera metadata."));
 }
 
 Visualizer* PosVisualizerPluginEditor::createNewCanvas()

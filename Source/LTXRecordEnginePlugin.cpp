@@ -49,7 +49,6 @@ namespace LTX {
     constexpr int spikesBytesPerChan = 4 /* 4 byte timestamp */ + 50 /* one-byte voltage for 50 samples */;
     constexpr int oeSampsPerSpike = 40; // seems to be hard-coded as 8+32 = 40
     constexpr int posTimestampChannel = 0; // provided by the bonsai source plugin
-    constexpr int posNaN = 1023; // when writing pos data as uint16s, if we encounter a NaN in the source float data, we write this value.
     constexpr const char* ignore_stream_prefixed = "memory_usage";
 
     RecordEnginePlugin::RecordEnginePlugin() {}
@@ -75,25 +74,22 @@ namespace LTX {
         eegFiles.clear();
         eegFullSampCount.clear();
         eegWrittenSamples.clear();
-        eegPaddingSamples.clear();
-        eegFirstDataDelay.clear();
-        eegStarted.clear();
         eegWriteChannels.clear();
-        recordingDelaySeconds = 0;
         timingSnapshot = Timing::Snapshot{};
         pendingWrites.clear();
         pendingBytes = 0;
         filesOpen = false;
-        timingFailed = false;
+        receivedRecordingData = false;
+        recordingFailed = false;
         timingError.clear();
         startingTimestamp = TIMESTAMP_UNINITIALIZED;
         posFirstTimestamp = TIMESTAMP_UNINITIALIZED;
         posSampRate = 0;
         posSampCount = 0;
         posSamplesBuffer.clear();
-        posStarted = false;
-        posRealSampCount = posPaddingSamples = 0;
-        posFirstDataDelay = 0;
+        posRealSampCount = 0;
+        cameraMetadata = CameraMetadata{};
+        timingHeaderSignature.clear();
         mode = RecordMode::NONE;
         basePath = rootFolder.getParentDirectory().getFullPathName().toStdString()
             + (experimentNumber == 1 ? "" : " e" + std::to_string(experimentNumber))
@@ -112,7 +108,7 @@ namespace LTX {
             LOGC("LTX RecordEngine using mode:POS_ONLY (", mode, ").");
             if (getNumRecordedDataStreams() > 1) { // WARNING: for some reason getTotalRecordedStreams() returns 0 when it should be 1, so this check it maybe totally broken
                 LOGE("For LTX pos, require exactly 1 data stream, but found ", getNumRecordedDataStreams(), " streams.");
-                failTiming("Position Record Node has more than one recorded data stream");
+                failRecording("Position Record Node has more than one recorded data stream");
                 return;
             }
         }
@@ -128,7 +124,7 @@ namespace LTX {
             }
             if (n_streams != 1) {
                 LOGE("For LTX eeg, require exactly 1 data stream (excluding a '", ignore_stream_prefixed, "', but found ", n_streams, " streams.");
-                failTiming("EEG Record Node must have exactly one non-memory data stream");
+                failRecording("EEG Record Node must have exactly one non-memory data stream");
                 return;
             }
         }
@@ -137,14 +133,18 @@ namespace LTX {
             registerTiming(experimentNumber, recordingNumber);
             if (mode == RecordMode::NONE) timingSession->exclude(timingNodeId);
         } catch (const std::exception& error) {
-            failTiming(error.what());
+            timingError = error.what(); // Diagnostics must never prevent recording.
+        }
+        try {
+            openOutputFiles();
+        } catch (const std::exception& error) {
+            failRecording(error.what());
         }
     }
 
-    void RecordEnginePlugin::openAlignedFiles()
+    void RecordEnginePlugin::openOutputFiles()
     {
-        const auto start_tm = std::chrono::system_clock::time_point(
-            std::chrono::milliseconds(*timingSnapshot.epochMs));
+        const auto start_tm = std::chrono::system_clock::now();
 
         if (mode == RecordMode::SPIKES_AND_SET) {
             setFile = std::make_unique<LTXFile>(basePath, ".set", start_tm);
@@ -198,9 +198,6 @@ namespace LTX {
             eegFiles.clear();
             eegFullSampCount.clear();
             eegWrittenSamples.clear();
-            eegPaddingSamples.clear();
-            eegFirstDataDelay.clear();
-            eegStarted.clear();
             eegWriteChannels.clear();
             for (int i = 0; i < getNumRecordedContinuousChannels(); i++) {
                 // important check before we get going...
@@ -224,9 +221,6 @@ namespace LTX {
                 f->AddHeaderPlaceholder("num_EEG_samples");
                 eegFullSampCount.push_back(0);
                 eegWrittenSamples.push_back(0);
-                eegPaddingSamples.push_back(0);
-                eegFirstDataDelay.push_back(0);
-                eegStarted.push_back(false);
             }
         }
         else if (mode == RecordMode::POS_ONLY) {
@@ -257,17 +251,54 @@ namespace LTX {
             posFile->AddHeaderValue("bearing_colour_3", 0);
             posFile->AddHeaderValue("bearing_colour_4", 0);
 
-            // not actually sure what they are supposed to mean. Maybe some of them
-            // might need to be computed based on the observed data and set at the end of the trial rather than configured by the user?
-            posFile->AddHeaderValue("pixels_per_metre", static_cast<double>(LTX::SharedState::pixels_per_metre.load()));
-            posFile->AddHeaderValue("window_min_x", LTX::SharedState::window_min_x.load());
-            posFile->AddHeaderValue("window_max_x", LTX::SharedState::window_max_x.load());
-            posFile->AddHeaderValue("window_min_y", LTX::SharedState::window_min_y.load());
-            posFile->AddHeaderValue("window_max_y", LTX::SharedState::window_max_y.load());
-            posFile->AddHeaderValue("min_x", LTX::SharedState::window_min_x.load());
-            posFile->AddHeaderValue("max_x", LTX::SharedState::window_max_x.load());
-            posFile->AddHeaderValue("min_y", LTX::SharedState::window_min_y.load());
-            posFile->AddHeaderValue("max_y", LTX::SharedState::window_max_y.load());
+            // Capture the matching stream directly, independently of the viewer.
+            const auto streamId = getContinuousChannel(getGlobalIndex(0))->getStreamId();
+            for (const DataStream* stream : getDataStreams())
+                if (stream->getStreamId() == streamId) cameraMetadata = readCameraMetadata(stream);
+            positionEncoding = PositionEncoding(cameraMetadata);
+            const bool metadataWindow = cameraMetadata.validWindow();
+            const int left = metadataWindow ? 0 : SharedState::window_min_x.load();
+            const int top = metadataWindow ? 0 : SharedState::window_min_y.load();
+            const int right = metadataWindow ? int(std::llround((double(cameraMetadata.window[2]) - cameraMetadata.window[0]) * positionEncoding.scale))
+                                             : SharedState::window_max_x.load();
+            const int bottom = metadataWindow ? int(std::llround((double(cameraMetadata.window[3]) - cameraMetadata.window[1]) * positionEncoding.scale))
+                                              : SharedState::window_max_y.load();
+            // An explicitly uncalibrated camera must not inherit stale viewer PPM.
+            const double ppm = cameraMetadata.present
+                ? (cameraMetadata.calibrated() ? cameraMetadata.ppm * positionEncoding.scale : std::numeric_limits<double>::quiet_NaN())
+                : double(SharedState::pixels_per_metre.load());
+            posFile->AddHeaderValue("position_metadata_source", cameraMetadata.present ? "camera_tracker" : "legacy_viewer");
+            if (cameraMetadata.present)
+                posFile->AddHeaderValue("data_source", "open-ephys-plugin-camera v0.1");
+            posFile->AddHeaderValue("pixels_per_metre", ppm);
+            posFile->AddHeaderValue("window_min_x", left);
+            posFile->AddHeaderValue("window_max_x", right);
+            posFile->AddHeaderValue("window_min_y", top);
+            posFile->AddHeaderValue("window_max_y", bottom);
+            posFile->AddHeaderValue("min_x", left);
+            posFile->AddHeaderValue("max_x", right);
+            posFile->AddHeaderValue("min_y", top);
+            posFile->AddHeaderValue("max_y", bottom);
+            if (cameraMetadata.present) {
+                if (cameraMetadata.hasPpm) posFile->AddHeaderValue("camera_tracker.pixels_per_metre", cameraMetadata.ppm);
+                if (cameraMetadata.hasWindow) {
+                    std::ostringstream values;
+                    for (auto value : cameraMetadata.window) values << value << ' ';
+                    posFile->AddHeaderValue("camera_tracker.window", values.str());
+                }
+                if (cameraMetadata.hasCrop) posFile->AddHeaderValue("camera_tracker.crop", cameraMetadata.cropText);
+                if (cameraMetadata.hasFrame) {
+                    posFile->AddHeaderValue("camera_tracker.frame_size", std::to_string(cameraMetadata.frame[0]) + " " + std::to_string(cameraMetadata.frame[1]));
+                }
+                posFile->AddHeaderValue("position_coordinate_transform", positionEncoding.transformed ? "crop_relative_uniform_scale" : "identity");
+                posFile->AddHeaderValue("position_coordinate_origin_x", positionEncoding.originX);
+                posFile->AddHeaderValue("position_coordinate_origin_y", positionEncoding.originY);
+                posFile->AddHeaderValue("position_coordinate_scale", positionEncoding.scale);
+                posFile->AddHeaderValue("position_missing_coordinate", 1023);
+                posFile->AddHeaderValue("position_area_units", "camera_pixels_saturated_uint16");
+                if (!cameraMetadata.validWindow())
+                    CoreServices::sendStatusMessage("LTX camera warning: stream crop bounds unavailable; using legacy coordinate mapping and viewer bounds.");
+            }
 
             posFile->AddHeaderPlaceholder("num_pos_samples");
             posSampCount = 0;
@@ -306,15 +337,14 @@ namespace LTX {
         timingSession = Timing::join(key, expected, timingNodeId, name);
     }
 
-    void RecordEnginePlugin::failTiming(const std::string& message)
+    void RecordEnginePlugin::failRecording(const std::string& message)
     {
-        if (timingFailed) return;
-        timingFailed = true;
+        if (recordingFailed) return;
+        recordingFailed = true;
         timingError = message;
-        if (timingSession) timingSession->fail(message);
         pendingWrites.clear();
         pendingBytes = 0;
-        const std::string warning = "LTX timing ERROR: " + message + ". Recording stopped; see timing metadata.";
+        const std::string warning = "LTX recording ERROR: " + message + ". Recording stopped; see timing metadata.";
         LOGE(warning);
         CoreServices::sendStatusMessage(warning.c_str());
         // Never wait for the GUI from the disk-writing thread.
@@ -323,9 +353,9 @@ namespace LTX {
 
     bool RecordEnginePlugin::reservePending(size_t bytes)
     {
-        if (timingFailed) return false;
+        if (recordingFailed) return false;
         if (bytes > maximumPendingBytes - pendingBytes) {
-            failTiming("LTX start origins unavailable before the 256 MiB staging limit");
+            failRecording("LTX native stream origin unavailable before the 256 MiB staging limit");
             return false;
         }
         pendingBytes += bytes;
@@ -334,19 +364,10 @@ namespace LTX {
 
     bool RecordEnginePlugin::flushPendingWrites()
     {
-        if (timingFailed || mode == NONE || !timingSession) return false;
+        if (recordingFailed || mode == NONE || !filesOpen) return false;
         try {
-            if (timingSession->hasFailed()) throw std::runtime_error(timingSession->snapshot().error);
-            if (!filesOpen) {
-                timingSnapshot = timingSession->snapshot();
-                if (!timingSnapshot.error.empty()) throw std::runtime_error(timingSnapshot.error);
-                if (!timingSnapshot.epochMs || startingTimestamp == TIMESTAMP_UNINITIALIZED) return false;
-                recordingDelaySeconds = timingSnapshot.delaySeconds(timingNodeId);
-                // Validate before allocating/writing padding in any format.
-                Timing::paddingSamples(recordingDelaySeconds, 1.0);
-                openAlignedFiles();
-                writeTimingMetadata(false);
-            }
+            updateTimingHeaders();
+            if (startingTimestamp == TIMESTAMP_UNINITIALIZED) return false;
             while (!pendingWrites.empty()) {
                 auto write = std::move(pendingWrites.front());
                 pendingWrites.pop_front();
@@ -355,7 +376,7 @@ namespace LTX {
             pendingBytes = 0;
             return true;
         } catch (const std::exception& error) {
-            failTiming(error.what());
+            failRecording(error.what());
             return false;
         }
     }
@@ -363,22 +384,45 @@ namespace LTX {
     void RecordEnginePlugin::addTimingHeaders(LTXFile& file)
     {
         file.AddHeaderValue("timing_method", "oe_first_recording_block_wall_clock");
-        file.AddHeaderValue("recording_epoch_unix_ms", static_cast<long long>(*timingSnapshot.epochMs));
         file.AddHeaderValue("record_node_id", timingNodeId);
-        file.AddHeaderValue("record_node_start_offset_ms", recordingDelaySeconds * 1000.0);
-        file.AddHeaderValue("startup_alignment_estimated", 1);
-        if (mode == SPIKES_AND_SET) {
-            file.AddHeaderValue("missing_start_seconds", recordingDelaySeconds);
-            file.AddHeaderValue("timestamp_start_offset_seconds", recordingDelaySeconds);
-        }
+        file.AddHeaderValue("startup_timing_estimated", 1);
+        file.AddHeaderValue("startup_timing_correction_applied", 0);
+        for (const char* key : {"recording_epoch_unix_ms", "record_node_start_unix_ms",
+                                "record_node_start_offset_ms", "startup_timing_status"})
+            file.AddDeferredHeader(key);
     }
 
-    void RecordEnginePlugin::addPaddingHeaders(LTXFile& file, uint64 count, double firstDataDelay, double rate)
+    void RecordEnginePlugin::updateTimingHeaders()
     {
-        file.AddHeaderValue("startup_padding_samples", static_cast<long long>(count));
-        file.AddHeaderValue("startup_first_data_offset_ms", firstDataDelay * 1000.0);
-        file.AddHeaderValue("startup_padding_residual_ms", (firstDataDelay - double(count) / rate) * 1000.0);
-        file.AddHeaderValue("startup_padding_value", mode == POS_ONLY ? "coords_1023_pixels_0" : "0");
+        timingSnapshot = timingSession ? timingSession->snapshot() : Timing::Snapshot{};
+        if (timingSession) for (const auto& warning : timingSession->takeWarnings()) {
+            std::ostringstream message;
+            message << "LTX timing: Record Node " << warning.first << " started " << warning.second
+                    << " ms after the earliest recorder (host-clock estimate). No correction applied;"
+                    << " discrepancy recorded in file headers and .timing-*.json.";
+            LOGC(message.str());
+            CoreServices::sendStatusMessage(message.str().c_str());
+        }
+        const auto own = timingSnapshot.starts.find(timingNodeId);
+        const bool available = timingSnapshot.epochMs && timingSnapshot.error.empty()
+            && own != timingSnapshot.starts.end() && own->second;
+        const std::string signature = (available ? std::to_string(*timingSnapshot.epochMs) : "unavailable")
+            + "/" + (own != timingSnapshot.starts.end() && own->second ? std::to_string(*own->second) : "unavailable");
+        if (signature == timingHeaderSignature) return;
+        const auto update = [&](LTXFile& file) {
+            file.UpdateDeferredHeader("recording_epoch_unix_ms", available ? std::to_string(*timingSnapshot.epochMs) : "unavailable");
+            file.UpdateDeferredHeader("record_node_start_unix_ms", own != timingSnapshot.starts.end() && own->second
+                ? std::to_string(*own->second) : "unavailable");
+            file.UpdateDeferredHeader("record_node_start_offset_ms", available
+                ? std::to_string(*own->second - *timingSnapshot.epochMs) : "unavailable");
+            file.UpdateDeferredHeader("startup_timing_status", available ? "measured_uncorrected" : "unavailable");
+        };
+        if (setFile) update(*setFile);
+        if (ttlFile) update(*ttlFile);
+        for (auto& file : tetFiles) update(*file);
+        for (auto& file : eegFiles) update(*file);
+        if (posFile) update(*posFile);
+        timingHeaderSignature = signature;
     }
 
     static std::string jsonString(const std::string& value)
@@ -404,25 +448,19 @@ namespace LTX {
             << "{\n  \"schema_version\": 1,\n  \"node_id\": " << timingNodeId
             << ",\n  \"complete\": " << (complete ? "true" : "false")
             << ",\n  \"method\": \"oe_first_recording_block_wall_clock\",\n"
-            << "  \"alignment_estimated\": true,\n  \"error\": " << jsonString(timingError.empty() ? snapshot.error : timingError)
+            << "  \"estimated\": true,\n  \"correction_applied\": false,\n  \"error\": " << jsonString(timingError.empty() ? snapshot.error : timingError)
             << ",\n  \"common_epoch_unix_ms\": ";
-        if (snapshot.epochMs) out << *snapshot.epochMs; else out << "null";
-        out << ",\n  \"record_node_offset_seconds\": " << recordingDelaySeconds
-            << ",\n  \"warning_threshold_ms\": " << Timing::warningThresholdMs
-            << ",\n  \"position_padding_samples\": " << posPaddingSamples
-            << ",\n  \"position_first_data_offset_seconds\": " << posFirstDataDelay
-            << ",\n  \"position_sample_rate\": " << posSampRate
-            << ",\n  \"position_applied_offset_seconds\": " << (posSampRate ? double(posPaddingSamples) / posSampRate : 0)
-            << ",\n  \"eeg_channels\": [";
-        for (size_t i = 0; i < eegPaddingSamples.size(); ++i) {
-            if (i) out << ',';
-            out << "{\"channel\":" << i + 1 << ",\"padding_samples\":" << eegPaddingSamples[i]
-                << ",\"first_data_offset_seconds\":" << eegFirstDataDelay[i]
-                << ",\"applied_offset_seconds\":" << double(eegPaddingSamples[i]) / eegOutputSampRate
-                << ",\"sample_rate\":" << eegOutputSampRate
-                << ",\"written_samples\":" << eegWrittenSamples[i] << '}';
-        }
-        out << "],\n  \"participants\": [";
+        if (snapshot.epochMs && snapshot.error.empty()) out << *snapshot.epochMs; else out << "null";
+        const auto own = snapshot.starts.find(timingNodeId);
+        const bool available = snapshot.epochMs && snapshot.error.empty()
+            && own != snapshot.starts.end() && own->second;
+        out << ",\n  \"timing_available\": " << (available ? "true" : "false");
+        out << ",\n  \"record_node_offset_seconds\": ";
+        if (snapshot.epochMs && snapshot.error.empty() && own != snapshot.starts.end() && own->second)
+            out << snapshot.delaySeconds(timingNodeId);
+        else out << "null";
+        out << ",\n  \"warning_threshold_ms\": " << Timing::warningThresholdMs
+            << ",\n  \"participants\": [";
         bool first = true;
         for (const auto& entry : snapshot.starts) {
             if (!first) out << ',';
@@ -441,24 +479,20 @@ namespace LTX {
     void RecordEnginePlugin::closeFiles()
     {
         if (timingSession && mode != NONE) {
-            auto snapshot = timingSession->snapshot();
-            if (!snapshot.starts.at(timingNodeId)) {
-                if (pendingWrites.empty()) {
-                    timingSession->exclude(timingNodeId);
-                    mode = NONE; // No recording callback or data ever arrived.
-                }
-                else failTiming("Recording ended without an Open Ephys software-time anchor");
-            }
-            // Only close may wait: each other engine has its own disk thread.
-            // Data callbacks must return to allow the sync messages to arrive.
-            if (mode != NONE && !timingFailed && !timingSession->waitForOrigins(std::chrono::milliseconds(250)))
-                failTiming("Recording ended before all LTX start origins arrived");
-            flushPendingWrites();
-            if (mode != NONE && !filesOpen && !timingFailed)
-                failTiming("Recording ended without a valid LTX stream origin");
+            const auto snapshot = timingSession->snapshot();
+            if (!snapshot.starts.at(timingNodeId) && !receivedRecordingData)
+                timingSession->exclude(timingNodeId);
+        }
+        flushPendingWrites();
+        if (!pendingWrites.empty() && !recordingFailed)
+            failRecording("Recording ended without a valid LTX stream origin");
+        if (receivedRecordingData && (!timingSession || !timingSession->snapshot().epochMs
+                            || !timingSession->snapshot().error.empty())) {
+            CoreServices::sendStatusMessage("LTX timing warning: startup discrepancy unavailable; recording data was not adjusted.");
         }
         const auto end_tm = std::chrono::system_clock::now();
         try {
+            if (filesOpen) updateTimingHeaders();
             if (filesOpen && mode == SPIKES_AND_SET) {
                 setFile->FinaliseFile(end_tm);
                 for (size_t i = 0; i < tetFiles.size(); i++) {
@@ -468,18 +502,21 @@ namespace LTX {
                 if (ttlFile) ttlFile->FinaliseFile(end_tm);
             } else if (filesOpen && mode == EEG_ONLY) {
                 for (size_t i = 0; i < eegFiles.size(); i++) {
-                    if (!eegStarted[i]) addPaddingHeaders(*eegFiles[i], 0, 0, eegOutputSampRate);
                     eegFiles[i]->FinaliseHeaderPlaceholder(static_cast<uint64_t>(eegWrittenSamples[i]));
                     eegFiles[i]->FinaliseFile(end_tm);
                 }
             } else if (filesOpen && mode == POS_ONLY) {
-                if (!posStarted) addPaddingHeaders(*posFile, 0, 0, posSampRate);
                 posFile->FinaliseHeaderPlaceholder(static_cast<uint64_t>(posSampCount));
                 posFile->FinaliseFile(end_tm);
             }
-            writeTimingMetadata(!timingFailed);
         } catch (const std::exception& error) {
-            failTiming(error.what());
+            failRecording(error.what());
+        }
+        try {
+            writeTimingMetadata(!recordingFailed);
+        } catch (const std::exception& error) {
+            LOGE(error.what());
+            CoreServices::sendStatusMessage("LTX timing warning: could not save timing JSON; see data-file headers.");
         }
         pendingWrites.clear();
         pendingBytes = 0;
@@ -493,36 +530,18 @@ namespace LTX {
         if (size <= 0 || mode == NONE) return;
         if (mode == SPIKES_AND_SET) { flushPendingWrites(); return; }
         if (getContinuousChannel(realChannel)->getStreamName().startsWith(ignore_stream_prefixed)) return;
+        receivedRecordingData = true;
         const size_t bytes = size_t(size) * (sizeof(float) + sizeof(double));
         if (!reservePending(bytes)) return;
         pendingWrites.emplace_back([this, writeChannel, realChannel,
                                     values = std::vector<float>(data, data + size),
                                     times = std::vector<double>(timestamps, timestamps + size)] {
-            writeAlignedContinuous(writeChannel, realChannel, values.data(), times.data(), int(values.size()));
+            writeLocalContinuous(writeChannel, realChannel, values.data(), times.data(), int(values.size()));
         });
         flushPendingWrites();
     }
 
-    void RecordEnginePlugin::beginPosition(double firstDataDelay)
-    {
-        posFirstDataDelay = firstDataDelay;
-        posPaddingSamples = Timing::paddingSamples(firstDataDelay, posSampRate);
-        addPaddingHeaders(*posFile, posPaddingSamples, firstDataDelay, posSampRate);
-        std::array<PosSample, 512> padding{};
-        for (auto& sample : padding)
-            for (int coordinate = 0; coordinate < 4; ++coordinate) sample.xy_etc[coordinate] = BSWAP16(posNaN);
-        for (uint64 at = 0; at < posPaddingSamples;) {
-            const size_t count = size_t(std::min<uint64>(padding.size(), posPaddingSamples - at));
-            for (size_t i = 0; i < count; ++i)
-                padding[i].timestamp = BSWAP32(static_cast<int32_t>(std::llround(double(at + i) / posSampRate * timestampTimebase)));
-            posFile->WriteBinaryData(padding.data(), count * sizeof(PosSample));
-            at += count;
-        }
-        posSampCount = posPaddingSamples;
-        posStarted = true;
-    }
-
-    void RecordEnginePlugin::writeAlignedContinuous(int writeChannel, int realChannel,
+    void RecordEnginePlugin::writeLocalContinuous(int writeChannel, int realChannel,
                                                     const float* data, const double* timestamps, int size)
     {
         // A complete block can precede its sync text in the GUI callback order.
@@ -536,23 +555,7 @@ namespace LTX {
         if (!std::isfinite(timestamps[0])) throw std::runtime_error("Invalid LTX continuous-data timestamp");
         if (mode == EEG_ONLY) {
             const size_t channel = eegWriteChannels.at(writeChannel);
-            if (!eegStarted[channel]) {
-                const double delay = recordingDelaySeconds + std::max(0.0, timestamps[0] - startingTimestamp);
-                const uint64 count = Timing::paddingSamples(delay, eegOutputSampRate);
-                eegPaddingSamples[channel] = count;
-                eegFirstDataDelay[channel] = delay;
-                addPaddingHeaders(*eegFiles[channel], count, delay, eegOutputSampRate);
-                std::array<int8_t, 1024> zeros{};
-                for (uint64 at = 0; at < count;) {
-                    const size_t block = size_t(std::min<uint64>(zeros.size(), count - at));
-                    eegFiles[channel]->WriteBinaryData(zeros.data(), block);
-                    at += block;
-                }
-                eegWrittenSamples[channel] = count;
-                eegStarted[channel] = true;
-            }
-            // Padding is at the output rate and must not change the input
-            // downsampling phase. Work in bounded chunks for large input blocks.
+            // Preserve input downsampling phase across blocks.
             constexpr int capacity = 1024;
             int8_t output[capacity];
             const uint64 remainder = eegFullSampCount[channel] % eegDownsampleBy;
@@ -568,8 +571,6 @@ namespace LTX {
             eegFullSampCount[channel] += size;
         } else if (mode == POS_ONLY) {
             if (writeChannel == posTimestampChannel) {
-                if (!posStarted)
-                    beginPosition(recordingDelaySeconds + std::max(0.0, timestamps[0] - startingTimestamp));
                 if (posFirstTimestamp == TIMESTAMP_UNINITIALIZED) {
                     for (int i = 0; i < size; ++i) {
                         if (std::isfinite(data[i])) {
@@ -586,7 +587,7 @@ namespace LTX {
                 for (int i = 0; i < size; ++i) {
                     const double localTime = std::isfinite(data[i])
                         ? data[i] - posFirstTimestamp : double(posRealSampCount + i) / posSampRate;
-                    const double time = localTime + double(posPaddingSamples) / posSampRate;
+                    const double time = localTime;
                     if (!std::isfinite(time) || time < 0 || time * timestampTimebase > std::numeric_limits<int32_t>::max())
                         throw std::runtime_error("Position timestamp outside the LTX int32 timebase");
                     posSamplesBuffer[i].timestamp = BSWAP32(static_cast<int32_t>(std::llround(time * timestampTimebase)));
@@ -596,9 +597,12 @@ namespace LTX {
             } else {
                 if (writeChannel < 1 || writeChannel >= requiredPosChans || posSamplesBuffer.size() != size_t(size))
                     throw std::runtime_error("Inconsistent LTX position channel order or block sizes");
-                for (int i = 0; i < size; ++i)
-                    posSamplesBuffer[i].xy_etc[writeChannel - 1] = BSWAP16(
-                        std::isnan(data[i]) ? (writeChannel <= 4 ? posNaN : 0) : static_cast<uint16_t>(data[i]));
+                for (int i = 0; i < size; ++i) {
+                    const uint16_t value = writeChannel <= 4
+                        ? positionEncoding.coordinate(data[i], writeChannel == 1 || writeChannel == 3)
+                        : positionEncoding.area(data[i]);
+                    posSamplesBuffer[i].xy_etc[writeChannel - 1] = BSWAP16(value);
+                }
                 if (writeChannel == requiredPosChans - 1)
                     posFile->WriteBinaryData(posSamplesBuffer.data(), sizeof(PosSample) * size);
             }
@@ -607,7 +611,8 @@ namespace LTX {
 
     void RecordEnginePlugin::writeEvent(int eventIndex, const EventPacket& event)
     {
-        if (mode != SPIKES_AND_SET || timingFailed) return;
+        if (mode != SPIKES_AND_SET || recordingFailed) return;
+        receivedRecordingData = true;
         const EventChannel* info = getEventChannel(eventIndex);
         EventPtr decoded = Event::deserialize(event, info);
         if (decoded->getEventType() != EventChannel::TTL) return;
@@ -616,24 +621,25 @@ namespace LTX {
         const int line = ttl->getLine();
         const bool state = ttl->getState();
         if (!reservePending(sizeof(double) + sizeof(int) + sizeof(bool))) return;
-        pendingWrites.emplace_back([this, timestamp, line, state] { writeAlignedEvent(timestamp, line, state); });
+        pendingWrites.emplace_back([this, timestamp, line, state] { writeLocalEvent(timestamp, line, state); });
         flushPendingWrites();
     }
 
-    void RecordEnginePlugin::writeAlignedEvent(double timestamp, int line, bool state)
+    void RecordEnginePlugin::writeLocalEvent(double timestamp, int line, bool state)
     {
         if (!ttlFile || timestamp < startingTimestamp) return;
         if (!std::isfinite(timestamp)) throw std::runtime_error("Invalid LTX TTL timestamp");
         std::ostringstream text;
         text << std::setprecision(17) << "ttl_" << line + 1 << " "
-             << timestamp - startingTimestamp + recordingDelaySeconds << " " << (state ? '1' : '0') << "\r\n";
+             << timestamp - startingTimestamp << " " << (state ? '1' : '0') << "\r\n";
         auto bytes = text.str();
         ttlFile->WriteBinaryData(bytes.data(), bytes.size());
     }
 
     void RecordEnginePlugin::writeSpike(int electrodeIndex, const Spike* spike)
     {
-        if (mode != SPIKES_AND_SET || timingFailed) return;
+        if (mode != SPIKES_AND_SET || recordingFailed) return;
+        receivedRecordingData = true;
         std::array<int8, spikesBytesPerChan * spikesNumChans> bytes{};
         const float* voltages = spike->getDataPointer();
         for (int channel = 0; channel < spikesNumChans; ++channel)
@@ -641,15 +647,15 @@ namespace LTX {
                 bytes.data() + channel * spikesBytesPerChan + 4);
         const double timestamp = spike->getTimestampInSeconds();
         if (!reservePending(bytes.size() + sizeof(double))) return;
-        pendingWrites.emplace_back([this, electrodeIndex, timestamp, bytes] { writeAlignedSpike(electrodeIndex, timestamp, bytes); });
+        pendingWrites.emplace_back([this, electrodeIndex, timestamp, bytes] { writeLocalSpike(electrodeIndex, timestamp, bytes); });
         flushPendingWrites();
     }
 
-    void RecordEnginePlugin::writeAlignedSpike(int electrodeIndex, double timestamp,
+    void RecordEnginePlugin::writeLocalSpike(int electrodeIndex, double timestamp,
                                                std::array<int8, 216> bytes)
     {
         if (timestamp < startingTimestamp) return;
-        const double seconds = timestamp - startingTimestamp + recordingDelaySeconds;
+        const double seconds = timestamp - startingTimestamp;
         if (!std::isfinite(seconds) || seconds * timestampTimebase > std::numeric_limits<int32_t>::max())
             throw std::runtime_error("Spike timestamp outside the LTX int32 timebase");
         const int32_t ticks = BSWAP32(static_cast<int32_t>(std::llround(seconds * timestampTimebase)));
@@ -662,24 +668,17 @@ namespace LTX {
     void RecordEnginePlugin::writeTimestampSyncText(DataStream* stream, int64 sampleNumber,
                                                    double timestamp, String text)
     {
-        if (mode == NONE || timingFailed || !timingSession) return;
+        if (mode == NONE || recordingFailed) return;
         if (stream == nullptr) {
-            if (text.startsWith("Software Time (")) {
+            if (timingSession && text.startsWith("Software Time (")) {
                 // The sampleNumber parameter carries Unix milliseconds for this
                 // message. The GUI's timestamp parameter is zero for null streams.
                 timingSession->publish(timingNodeId, sampleNumber);
-                for (const auto& warning : timingSession->takeWarnings()) {
-                    std::ostringstream message;
-                    message << "LTX timing: Record Node " << warning.first << " started " << warning.second
-                            << " ms after the earliest recorder. Applying startup padding/timestamp correction"
-                            << " (host-clock estimate); see .timing-*.json.";
-                    LOGC(message.str());
-                    CoreServices::sendStatusMessage(message.str().c_str());
-                }
+
             }
         } else if (!stream->getName().startsWith(ignore_stream_prefixed)) {
             if (startingTimestamp != TIMESTAMP_UNINITIALIZED || !std::isfinite(timestamp) || timestamp < 0) {
-                failTiming("Invalid or repeated LTX stream recording origin");
+                failRecording("Invalid or repeated LTX stream recording origin");
                 return;
             }
             startingTimestamp = timestamp;

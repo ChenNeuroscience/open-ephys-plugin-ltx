@@ -3,9 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -19,14 +17,6 @@
 namespace LTX::Timing {
 
     constexpr double warningThresholdMs = 50.0;
-    constexpr double maximumPaddingSeconds = 600.0;
-
-    inline std::uint64_t paddingSamples(double seconds, double rate) {
-        if (!std::isfinite(seconds) || seconds < 0 || seconds > maximumPaddingSeconds
-            || !std::isfinite(rate) || rate <= 0)
-            throw std::runtime_error("Invalid or excessive LTX startup padding");
-        return static_cast<std::uint64_t>(std::llround(seconds * rate));
-    }
 
     struct Snapshot {
         std::map<int, std::optional<std::int64_t>> starts;
@@ -73,24 +63,12 @@ namespace LTX::Timing {
             resolveLocked();
         }
 
-        void fail(const std::string& message) {
-            std::lock_guard<std::mutex> lock(mutex);
-            failLocked(message);
-        }
-
         Snapshot snapshot() const {
             std::lock_guard<std::mutex> lock(mutex);
             return state;
         }
 
         bool hasFailed() const { return failed.load(std::memory_order_relaxed); }
-
-        bool waitForOrigins(std::chrono::milliseconds timeout) {
-            std::unique_lock<std::mutex> lock(mutex);
-            return changed.wait_for(lock, timeout, [&] {
-                return state.epochMs.has_value() || !state.error.empty();
-            });
-        }
 
         std::vector<std::pair<int, double>> takeWarnings() {
             std::lock_guard<std::mutex> lock(mutex);
@@ -110,28 +88,19 @@ namespace LTX::Timing {
         void failLocked(const std::string& message) {
             if (state.error.empty()) state.error = message;
             failed.store(true, std::memory_order_relaxed);
-            changed.notify_all();
         }
 
         void resolveLocked() {
             if (state.epochMs || !state.error.empty()) return;
             std::optional<std::int64_t> earliest;
-            std::optional<std::int64_t> latest;
             for (const auto& entry : state.starts) {
                 if (!entry.second && !state.inactive.count(entry.first)) return;
                 if (entry.second && (!earliest || *entry.second < *earliest)) earliest = entry.second;
-                if (entry.second && (!latest || *entry.second > *latest)) latest = entry.second;
-            }
-            if (earliest && double(*latest - *earliest) / 1000.0 > maximumPaddingSeconds) {
-                failLocked("LTX recording origins differ by more than ten minutes");
-                return;
             }
             state.epochMs = earliest;
-            changed.notify_all();
         }
 
         mutable std::mutex mutex;
-        std::condition_variable changed;
         std::set<int> claimed;
         Snapshot state;
         bool announced = false;

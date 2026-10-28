@@ -24,7 +24,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    - name: Test recording alignment and padding on Windows
+    - name: Test timing diagnostics and camera metadata on Windows
       run: python Tests/run_tests.py --cmake
       shell: pwsh
     - name: setup

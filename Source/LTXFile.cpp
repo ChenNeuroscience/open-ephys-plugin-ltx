@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cerrno>
 #include <stdexcept>
+#include <iomanip>
 
 namespace LTX {
 	constexpr const char* data_start_token = "\r\ndata_start";
@@ -61,7 +62,7 @@ namespace LTX {
 		
 		// format the value as a string
 		std::ostringstream oss;
-		oss << value;
+		oss << std::setprecision(17) << value;
 
 		fprintf(theFile, "\r\n%s %s", key.c_str(), oss.str().c_str());
 	}
@@ -71,6 +72,27 @@ namespace LTX {
 	template void LTXFile::AddHeaderValue<std::string>(const std::string&, std::string);
 	template void LTXFile::AddHeaderValue<long long>(const std::string&, long long);
 	template void LTXFile::AddHeaderValue<double>(const std::string&, double);
+
+    void LTXFile::AddDeferredHeader(const std::string& key) {
+        std::lock_guard<std::mutex> lock(mut);
+        if (status != HEADERS || deferredHeaders.count(key))
+            throw std::runtime_error("Invalid deferred LTX header: " + key);
+        fprintf(theFile, "\r\n%s ", key.c_str());
+        deferredHeaders[key] = ftell(theFile);
+        fprintf(theFile, "%-96s", "unavailable");
+    }
+
+    void LTXFile::UpdateDeferredHeader(const std::string& key, const std::string& value) {
+        std::lock_guard<std::mutex> lock(mut);
+        if (status == CLOSED || value.size() > 96 || !deferredHeaders.count(key))
+            throw std::runtime_error("Invalid deferred LTX header update: " + key);
+        const long previous = ftell(theFile);
+        if (previous < 0 || fseek(theFile, deferredHeaders.at(key), SEEK_SET) != 0)
+            throw std::runtime_error("Cannot seek LTX header");
+        fprintf(theFile, "%-96s", value.c_str());
+        if (ferror(theFile) || fseek(theFile, previous, SEEK_SET) != 0)
+            throw std::runtime_error("Cannot update LTX header");
+    }
 
 	void LTXFile::AddHeaderPlaceholder(const std::string& key) {
 		std::lock_guard<std::mutex> lock(mut);

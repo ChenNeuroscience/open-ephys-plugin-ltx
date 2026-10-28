@@ -3,10 +3,9 @@
 #ifndef LTXSHARED_STATE
 #define LTXSHARED_STATE
 
-/*
-Using globals here is exceptionally hacky, but I couldn't find any other way using the plugin API to let the user specify some custom headers for the record
-engine to write. Any of the plugins here can update these values and they will be written at the start of the recording.
-*/
+/* Legacy fallback for Bonsai streams without camera_tracker metadata. The
+   viewer supplies these settings; metadata-aware streams are read directly by
+   the recorder and do not write these globals. */
 namespace LTX {
     namespace SharedState {
         extern std::atomic<int> window_min_x;

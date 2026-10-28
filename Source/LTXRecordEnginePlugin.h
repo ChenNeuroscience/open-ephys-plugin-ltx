@@ -27,6 +27,7 @@
 #include <RecordingLib.h>
 #include "LTXFile.h"
 #include "LTXRecordingTiming.h"
+#include "LTXCameraMetadata.h"
 
 
 #include <stdio.h>
@@ -105,21 +106,17 @@ namespace LTX {
         std::vector<std::unique_ptr<LTXFile>> eegFiles;
         std::vector<uint64> eegFullSampCount;
         std::vector<uint64> eegWrittenSamples;
-        std::vector<uint64> eegPaddingSamples;
-        std::vector<double> eegFirstDataDelay;
-        std::vector<bool> eegStarted;
         std::map<int, size_t> eegWriteChannels;
 
         std::unique_ptr<LTXFile> posFile;
         uint64 posSampCount = 0;
-        size_t posSampRate = 0;
+        double posSampRate = 0;
 
         // this relates to the hacky timestamp encoded in one of the voltage streams not the proper timestamp data
         double posFirstTimestamp = TIMESTAMP_UNINITIALIZED; 
         uint64 posRealSampCount = 0;
-        uint64 posPaddingSamples = 0;
-        double posFirstDataDelay = 0;
-        bool posStarted = false;
+        CameraMetadata cameraMetadata;
+        PositionEncoding positionEncoding;
 
         // We assume that the channels come in order so that we know when we've got all the data for a given batch of samples.
         struct PosSample {
@@ -133,10 +130,11 @@ namespace LTX {
         int timingNodeId = -1;
         std::shared_ptr<Timing::Session> timingSession;
         Timing::Snapshot timingSnapshot;
-        double recordingDelaySeconds = 0;
         bool filesOpen = false;
-        bool timingFailed = false;
+        bool receivedRecordingData = false;
+        bool recordingFailed = false;
         std::string timingError;
+        std::string timingHeaderSignature;
         std::deque<std::function<void()>> pendingWrites;
         size_t pendingBytes = 0;
         static constexpr size_t maximumPendingBytes = 256 * 1024 * 1024;
@@ -144,17 +142,16 @@ namespace LTX {
         void registerTiming(int experimentNumber, int recordingNumber);
         bool flushPendingWrites();
         bool reservePending(size_t bytes);
-        void failTiming(const std::string& message);
-        void openAlignedFiles();
+        void failRecording(const std::string& message);
+        void openOutputFiles();
+        void updateTimingHeaders();
         void writeTimingMetadata(bool complete);
         void addTimingHeaders(LTXFile& file);
-        void addPaddingHeaders(LTXFile& file, uint64 count, double firstDataDelay, double rate);
-        void writeAlignedContinuous(int writeChannel, int realChannel,
+        void writeLocalContinuous(int writeChannel, int realChannel,
                                     const float* data, const double* timestamps, int size);
-        void writeAlignedSpike(int electrodeIndex, double timestamp,
+        void writeLocalSpike(int electrodeIndex, double timestamp,
                                std::array<int8, 216> bytes);
-        void writeAlignedEvent(double timestamp, int line, bool state);
-        void beginPosition(double firstDataDelay);
+        void writeLocalEvent(double timestamp, int line, bool state);
         
         /** Sets an engine parameter */
 	    void setParameter (EngineParameter& parameter) override;

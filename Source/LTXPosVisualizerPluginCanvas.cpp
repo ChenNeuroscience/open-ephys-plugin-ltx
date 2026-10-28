@@ -42,94 +42,99 @@ namespace LTX{
 
 	PosPlot::~PosPlot(){}
 
-	void PosPlot::paint(Graphics& g)
-	{
-
-		float W = static_cast<float>(paramRight->getValue()) - static_cast<float>(paramLeft->getValue());
-		float H = static_cast<float>(paramBottom->getValue()) - static_cast<float>(paramTop->getValue());
-		float ppm = paramPPM->getValue();
-
-        
-		
-		const float pixelFactor = std::min(
-			(getWidth() - margin * 2) / static_cast<float>(W),
-			(getHeight() - margin * 2) / static_cast<float>(H)
-		);
-
-		auto toXPixels = [pixelFactor](float v) -> int { return margin + v * pixelFactor;};
-		auto toYPixels = [pixelFactor](float v) -> int { return margin + v * pixelFactor;};
-
-		g.setColour(Colours::white);
-		g.fillRect(margin, margin, static_cast<int>(W*pixelFactor), static_cast<int>(H*pixelFactor));
-
-		g.setFont(Font("Arial", 14, Font::FontStyleFlags::bold));
-
-		g.drawSingleLineText("< " + formatFloat(W * 100 / ppm, 0) + "cm >", toXPixels(W / 2), toYPixels(0) - 6, Justification::centred);
-		g.saveState();
-		g.addTransform(AffineTransform::rotation(-MathConstants<float>::halfPi, toXPixels(0) - 6, toYPixels(H / 2)));
-		g.drawSingleLineText("< " + formatFloat(H * 100 / ppm, 0) + "cm >", toXPixels(0) - 6, toYPixels(H / 2), Justification::centred);
-		g.restoreState();
-
-		bool isRecording = processor->isRecording.load();
-
-        if(processor->recordingBuffer.start_read() >= 2){
-            // we always render the path (if there is any), just in a different shade when recording is not currently active
-
-            // * pixelFactor + margin
-            g.setColour(isRecording ? Colours::black : Colours::grey);
-
-			PosPoint posSampA;
-			PosPoint posSampB;
-			processor->recordingBuffer.read(posSampA);
-			while (processor->recordingBuffer.read(posSampB)) {
-                g.drawLine(
-					posSampA.x * pixelFactor + margin,
-					posSampA.y * pixelFactor + margin,
-					posSampB.x * pixelFactor + margin,
-					posSampB.y * pixelFactor + margin,
-					1.0f
-                );
-				posSampA = posSampB;
+    void PosPlot::paint(Graphics& g)
+    {
+        const auto metadata = processor->getCameraMetadata();
+        if (metadata->present && !metadata->validWindow()) {
+            g.setColour(Colours::white);
+            g.drawText("Waiting for camera crop bounds", getLocalBounds(), Justification::centred);
+            return;
+        }
+        const float left = metadata->present ? float(metadata->window[0]) : float(paramLeft->getValue());
+        const float top = metadata->present ? float(metadata->window[1]) : float(paramTop->getValue());
+        const float right = metadata->present ? float(metadata->window[2]) : float(paramRight->getValue());
+        const float bottom = metadata->present ? float(metadata->window[3]) : float(paramBottom->getValue());
+        const float W = right - left, H = bottom - top;
+        const double ppm = metadata->present ? metadata->ppm : double(float(paramPPM->getValue()));
+        if (W <= 0 || H <= 0 || getWidth() <= 2 * margin || getHeight() <= 2 * margin) return;
+        const float pixelFactor = std::min((getWidth() - margin * 2) / W, (getHeight() - margin * 2) / H);
+        const auto toX = [=](double x) { return float(margin + (x - left) * pixelFactor); };
+        const auto toY = [=](double y) { return float(margin + (y - top) * pixelFactor); };
+        const Rectangle<float> bounds(float(margin), float(margin), W * pixelFactor, H * pixelFactor);
+        Path arena;
+        if (metadata->present && metadata->shape == CameraMetadata::Shape::Circle) {
+            arena.addEllipse(toX(metadata->cx - metadata->width / 2), toY(metadata->cy - metadata->height / 2),
+                             float(metadata->width * pixelFactor), float(metadata->height * pixelFactor));
+        } else if (metadata->present && metadata->shape == CameraMetadata::Shape::Rectangle) {
+            const double radians = metadata->angleDegrees * MathConstants<double>::pi / 180;
+            for (int i = 0; i < 4; ++i) {
+                const double dx = (i == 0 || i == 3 ? -1 : 1) * metadata->width / 2;
+                const double dy = (i < 2 ? -1 : 1) * metadata->height / 2;
+                const float x = toX(metadata->cx + dx * std::cos(radians) - dy * std::sin(radians));
+                const float y = toY(metadata->cy + dx * std::sin(radians) + dy * std::cos(radians));
+                if (i == 0) arena.startNewSubPath(x, y); else arena.lineTo(x, y);
             }
-		}
+            arena.closeSubPath();
+        } else arena.addRectangle(bounds);
 
-		// render latest pos samp as two blobs
-		// note that these are individually atomic, so it's possible to see a parital update..but that's not that a big deal, hopefully.
-		float timestamp = processor->latestPosSamp.timestamp.load();
-		float x1 = processor->latestPosSamp.x1.load();
-		float y1 = processor->latestPosSamp.y1.load();
-		float x2 = processor->latestPosSamp.x2.load();
-		float y2 = processor->latestPosSamp.y2.load();
-		float numpix1 = processor->latestPosSamp.numpix1.load();
-		float numpix2 = processor->latestPosSamp.numpix2.load();
-		
-		if (numpix1 > 0) {
-			g.setColour(Colours::green);
-			g.fillEllipse(toXPixels(x1), toYPixels(y1), std::sqrt(numpix1)+1, std::sqrt(numpix1)+1);
-			g.drawSingleLineText("(" + formatFloat(x1, 1) + ", " + formatFloat(y1, 1) + ")", toXPixels(0), toYPixels(H)+16);
-		}
+        g.setColour(Colours::white);
+        g.setFont(FontOptions("Arial", 14, Font::FontStyleFlags::bold));
+        const auto distanceLabel = [ppm](float pixels) -> String {
+            return std::isfinite(ppm) && ppm > 0 ? formatFloat(float(pixels * 100 / ppm), 0) + "cm"
+                                               : formatFloat(pixels, 0) + "px (uncalibrated)";
+        };
+        g.drawSingleLineText("< " + distanceLabel(W) + " >", int(toX((left + right) / 2)), margin - 6, Justification::centred);
+        g.saveState();
+        g.addTransform(AffineTransform::rotation(-MathConstants<float>::halfPi, margin - 6.0f, toY((top + bottom) / 2)));
+        g.drawSingleLineText("< " + distanceLabel(H) + " >", margin - 6, int(toY((top + bottom) / 2)), Justification::centred);
+        g.restoreState();
 
-		if (numpix2 > 0) {
-			g.setColour(Colours::red);
-			g.fillEllipse(toXPixels(x2), toYPixels(y2), std::sqrt(numpix2)+1, std::sqrt(numpix2)+1);
-			g.drawSingleLineText("(" + formatFloat(x2, 1) + ", " + formatFloat(y2, 1) + ")", toXPixels(0), toYPixels(H) +32);
-		}
+        // Clip both the arena and its bounding box: rotated crops can extend
+        // beyond the camera frame, whose clipped window is the visible extent.
+        g.saveState();
+        g.reduceClipRegion(bounds.toNearestInt());
+        g.reduceClipRegion(arena);
+        g.setColour(Colours::white);
+        g.fillPath(arena);
+        const bool isRecording = processor->isRecording.load();
+        const auto displayX = [&](float x) { return metadata->present ? x : clamp(x, left, right); };
+        const auto displayY = [&](float y) { return metadata->present ? y : clamp(y, top, bottom); };
+        if (processor->recordingBuffer.start_read() >= 2) {
+            g.setColour(isRecording ? Colours::black : Colours::grey);
+            PosPoint previous, next;
+            processor->recordingBuffer.read(previous);
+            while (processor->recordingBuffer.read(next)) {
+                g.drawLine(toX(displayX(previous.x)), toY(displayY(previous.y)),
+                           toX(displayX(next.x)), toY(displayY(next.y)), 1.0f);
+                previous = next;
+            }
+        }
+        const float x1 = processor->latestPosSamp.x1.load(), y1 = processor->latestPosSamp.y1.load();
+        const float x2 = processor->latestPosSamp.x2.load(), y2 = processor->latestPosSamp.y2.load();
+        const float area1 = processor->latestPosSamp.numpix1.load(), area2 = processor->latestPosSamp.numpix2.load();
+        const auto drawBlob = [&](float x, float y, float area, Colour colour) {
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(area) || area <= 0) return;
+            const float diameter = std::max(2.0f, 2 * std::sqrt(area / MathConstants<float>::pi) * pixelFactor);
+            g.setColour(colour);
+            g.fillEllipse(toX(displayX(x)) - diameter / 2, toY(displayY(y)) - diameter / 2, diameter, diameter);
+        };
+        drawBlob(x1, y1, area1, Colours::green);
+        drawBlob(x2, y2, area2, Colours::red);
+        g.restoreState();
 
-		// render timestamp
-		if (isRecording) {
-			g.setColour(Colours::red);
-			g.fillEllipse(toXPixels(W) - 10, toYPixels(H) + 7, 10, 10);
-			g.drawSingleLineText(formatAsMinSecs(timestamp, 1), toXPixels(W)-16, toYPixels(H) + 16, Justification::right);
-		} else {
-			g.setColour(Colours::white);
-			g.drawSingleLineText(formatAsMinSecs(timestamp, 1), toXPixels(W), toYPixels(H) + 16, Justification::right);
-		}
-
-
-
-
-
-	}
+        const auto drawCoordinates = [&](float x, float y, float area, Colour colour, int offset) {
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(area) || area <= 0) return;
+            g.setColour(colour);
+            g.drawSingleLineText("(" + formatFloat(x, 1) + ", " + formatFloat(y, 1) + ")", margin, int(toY(bottom)) + offset);
+        };
+        drawCoordinates(x1, y1, area1, Colours::green, 16);
+        drawCoordinates(x2, y2, area2, Colours::red, 32);
+        const float timestamp = processor->latestPosSamp.timestamp.load();
+        g.setColour(isRecording ? Colours::red : Colours::white);
+        if (isRecording) g.fillEllipse(toX(right) - 10, toY(bottom) + 7, 10, 10);
+        g.drawSingleLineText(std::isfinite(timestamp) ? formatAsMinSecs(timestamp, 1) : String("no frame"),
+                            int(toX(right)) - (isRecording ? 16 : 0), int(toY(bottom)) + 16, Justification::right);
+    }
 
 
 	PosVisualizerPluginCanvas::PosVisualizerPluginCanvas(PosVisualizerPlugin* processor_)
