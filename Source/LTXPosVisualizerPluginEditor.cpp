@@ -52,7 +52,9 @@ PosVisualizerPluginEditor::PosVisualizerPluginEditor(GenericProcessor* p)
 }
 
 void PosVisualizerPluginEditor::refreshMetadataControls() {
-    const auto metadata = static_cast<PosVisualizerPlugin*>(getProcessor())->getCameraMetadata();
+    const auto* processor = dynamic_cast<PosVisualizerPlugin*>(getProcessor());
+    if (!processor) return;
+    const auto metadata = processor->getCameraMetadata();
     const char* names[] = {"left", "right", "top", "bottom", "ppm"};
     const int indices[] = {0, 2, 1, 3};
     for (int i = 0; i < 5; ++i) {
@@ -62,8 +64,10 @@ void PosVisualizerPluginEditor::refreshMetadataControls() {
         if (metadata->present) {
             const String value = i == 4 ? (metadata->calibrated() ? String(metadata->ppm, 2) : String("uncalibrated"))
                 : (metadata->validWindow() ? String(metadata->window[indices[i]]) : String("unavailable"));
-            control->getValueLabel()->setText(value, dontSendNotification);
-            control->getValueLabel()->setEditable(false, false, false);
+            if (auto* label = control->getValueLabel()) {
+                label->setText(value, dontSendNotification);
+                label->setEditable(false, false, false);
+            }
         } else if (metadataControlsLocked) control->updateView();
     }
     metadataControlsLocked = metadata->present;

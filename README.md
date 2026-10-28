@@ -116,6 +116,26 @@ python3 Tests/run_tests.py --gui-source /path/to/open-ephys-main
 
 Windows CI runs the same file-level tests and builds the plugin against release `d728c1b2a`. PR/manual builds do not create releases. Windows GUI/hardware LED–TTL validation remains a separate integration check.
 
+The metadata regression can also link the GUI's actual `Metadata.cpp` and JUCE core:
+
+```sh
+python3 Tests/run_tests.py --cmake --native-api /path/to/open-ephys-main
+```
+
+This checks a metadata read before acquisition, including the GUI's extra byte for `CHAR` fields, full-length crop text, and unknown crop formats. The viewer and recorder use the bounded `String` getter; the pointer getter copies 129 bytes for a declared `CHAR[128]` field. Windows CI runs this regression against the pinned GUI sources.
+
+## Troubleshooting a viewer crash on Windows
+
+For the installed GUI release `d728c1b2a`, paste this into File Explorer's address bar:
+
+```text
+%LOCALAPPDATA%\Open Ephys\configs-api10
+```
+
+Look for `activity_MM-DD-YYYY_HH_MM_SS.log` (the saved crash log), `activity.log` (the current session), and `recoveryConfig.xml` (the recoverable signal chain). If the crash handler could not finish, only `activity.log` may exist; copy it before restarting, because the next launch replaces it. Development builds under `plugin-GUI\Build` store these files beside the executable instead.
+
+Exit Open Ephys completely before replacing the LTX DLL, keep one installed copy, then restart. A viewer add/remove does not unload a DLL already loaded by the process. The metadata-reader fix also protects position recording, since the viewer and recorder share that reader.
+
 See the [Open Ephys Plugin API docs](https://open-ephys.github.io/gui-docs/Developer-Guide/Open-Ephys-Plugin-API/index.html) for info on how to develop a plugin
 including links to the template repos. It's also worth looking at the source code for other plugins and the plugin-gui repo itself. A lot of what's been done here was
 inspired by existing code.

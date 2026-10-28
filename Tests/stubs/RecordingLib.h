@@ -68,6 +68,10 @@ struct DataStream::Field {
     std::vector<unsigned char> bytes;
     template <class T> void getValue(T& value) const { std::memcpy(&value, bytes.data(), sizeof(T)); }
     template <class T> void getValue(T* values) const { std::memcpy(values, bytes.data(), bytes.size()); }
+    void getValue(String& value) const {
+        const auto end = std::find(bytes.begin(), bytes.begin() + count, 0);
+        value = String(std::string(bytes.begin(), end));
+    }
 };
 inline int DataStream::findMetadata(int type, unsigned int length, String identifier) const {
     for (size_t i = 0; i < metadata.size(); ++i)
@@ -77,8 +81,10 @@ inline int DataStream::findMetadata(int type, unsigned int length, String identi
 template <class T> void DataStream::add(int type, const char* name, const T* values, size_t count) {
     auto field = std::make_shared<Field>();
     field->type = type; field->name = name; field->count = unsigned(count);
-    field->bytes.resize(sizeof(T) * count);
-    std::memcpy(field->bytes.data(), values, field->bytes.size());
+    // Match MetadataValue::getSize/getValue in the pinned GUI exactly: CHAR
+    // has one additional byte, and the pointer overload copies that byte too.
+    field->bytes.resize(sizeof(T) * count + (type == MetadataDescriptor::CHAR ? 1 : 0));
+    std::memcpy(field->bytes.data(), values, sizeof(T) * count);
     metadata.push_back(field);
 }
 class ContinuousChannel {

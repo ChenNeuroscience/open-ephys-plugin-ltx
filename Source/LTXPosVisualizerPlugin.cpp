@@ -51,10 +51,10 @@ void PosVisualizerPlugin::registerParameters()
 
     addFloatParameter(Parameter::PROCESSOR_SCOPE, "ppm", "PPM", "Pixels Per Meter", "pixels", 400.0f, 100.0f, 1000.0f, 0.1, false);
 
-    paramLeft = reinterpret_cast<IntParameter*>(getParameter("left"));
-    paramRight = reinterpret_cast<IntParameter*>(getParameter("right"));
-    paramTop = reinterpret_cast<IntParameter*>(getParameter("top"));
-    paramBottom = reinterpret_cast<IntParameter*>(getParameter("bottom"));
+    paramLeft = dynamic_cast<IntParameter*>(getParameter("left"));
+    paramRight = dynamic_cast<IntParameter*>(getParameter("right"));
+    paramTop = dynamic_cast<IntParameter*>(getParameter("top"));
+    paramBottom = dynamic_cast<IntParameter*>(getParameter("bottom"));
 
 }
 
@@ -68,11 +68,13 @@ AudioProcessorEditor* PosVisualizerPlugin::createEditor()
 void PosVisualizerPlugin::updateSettings()
 {
     hasPositionStream = false;
+    positionChannels.fill(-1);
     for (const DataStream* stream : getDataStreams()) {
+        if (!stream) continue;
         if (stream->getName() != "bonsai") continue;
         int count = 0;
         for (int i = 0; i < continuousChannels.size(); ++i) {
-            if (continuousChannels[i]->getStreamId() == stream->getStreamId()) {
+            if (continuousChannels[i] && continuousChannels[i]->getStreamId() == stream->getStreamId()) {
                 if (count < 7) positionChannels[count] = i;
                 ++count;
             }
@@ -91,14 +93,16 @@ void PosVisualizerPlugin::refreshCameraMetadata() {
     CameraMetadata next;
     if (hasPositionStream) {
         for (const DataStream* stream : getDataStreams())
-            if (stream->getStreamId() == positionStreamId) next = readCameraMetadata(stream);
+            if (stream && stream->getStreamId() == positionStreamId) next = readCameraMetadata(stream);
     }
     const auto previous = getCameraMetadata();
     if (previous->present != next.present || previous->window != next.window || previous->cropText != next.cropText)
         recordingBuffer.clear(); // Do not mix paths from different arenas.
     std::atomic_store(&cameraMetadata, std::make_shared<const CameraMetadata>(next));
-    for (const char* name : {"left", "right", "top", "bottom", "ppm"})
-        if (getParameter(name)->isEnabled() == next.present) getParameter(name)->setEnabled(!next.present);
+    for (const char* name : {"left", "right", "top", "bottom", "ppm"}) {
+        if (auto* parameter = getParameter(name))
+            if (parameter->isEnabled() == next.present) parameter->setEnabled(!next.present);
+    }
     if (previous->present && !next.present) parameterValueChanged(nullptr);
     if (auto* posEditor = dynamic_cast<PosVisualizerPluginEditor*>(editor.get()))
         posEditor->refreshMetadataControls();
@@ -129,6 +133,11 @@ void PosVisualizerPlugin::process(AudioBuffer<float>& buffer)
         if (numSamples == 0) {
             return;
         }
+        // Reject incomplete mappings and transiently smaller buffers during
+        // signal-chain reconfiguration before taking any channel pointers.
+        if (numSamples > static_cast<uint32>(buffer.getNumSamples())) return;
+        for (int channel : positionChannels)
+            if (channel < 0 || channel >= buffer.getNumChannels()) return;
 
         if (isRecording) {
             // Keep camera coordinates; the canvas applies the current crop.
@@ -187,11 +196,13 @@ void PosVisualizerPlugin::loadCustomParametersFromXml(XmlElement* parentElement)
 
 void PosVisualizerPlugin::parameterValueChanged(Parameter* param) {
     if (getCameraMetadata()->present) return;
+    auto* ppm = getParameter("ppm");
+    if (!paramLeft || !paramRight || !paramTop || !paramBottom || !ppm) return;
     LTX::SharedState::window_min_x = paramLeft->getValue();
     LTX::SharedState::window_max_x = paramRight->getValue();
     LTX::SharedState::window_min_y = paramTop->getValue();
     LTX::SharedState::window_max_y = paramBottom->getValue();
-    LTX::SharedState::pixels_per_metre = getParameter("ppm")->getValue();
+    LTX::SharedState::pixels_per_metre = ppm->getValue();
 };
 
 }

@@ -261,6 +261,9 @@ static void metadataTests() {
     DataStream camera("bonsai");
     addCameraMetadata(camera, "rectangle(cx,cy,w,h,deg) 820 590 1440 1080 17.19");
     auto metadata = LTX::readCameraMetadata(&camera);
+    // The real GUI includes an extra byte for CHAR metadata. Keep the shim
+    // contract explicit; omitting it used to hide a pre-acquisition overflow.
+    assert(camera.metadata[2]->bytes.size() == 129);
     assert(metadata.present && metadata.validWindow() && metadata.calibrated());
     assert(metadata.window[0] == 100 && metadata.frame[0] == 1920 && metadata.ppm == 800);
     assert(metadata.shape == LTX::CameraMetadata::Shape::Rectangle);

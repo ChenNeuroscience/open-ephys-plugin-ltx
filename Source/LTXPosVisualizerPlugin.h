@@ -146,10 +146,10 @@ private:
     std::array<int, 7> positionChannels{{-1, -1, -1, -1, -1, -1, -1}};
     uint16 positionStreamId = 0;
     bool hasPositionStream = false;
-    IntParameter* paramLeft;
-    IntParameter* paramRight;
-	IntParameter* paramTop;
-    IntParameter* paramBottom;
+    IntParameter* paramLeft = nullptr;
+    IntParameter* paramRight = nullptr;
+	IntParameter* paramTop = nullptr;
+    IntParameter* paramBottom = nullptr;
 
 	/** Generates an assertion if this class leaks */
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PosVisualizerPlugin);

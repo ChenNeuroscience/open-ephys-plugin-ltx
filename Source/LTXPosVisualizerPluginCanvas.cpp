@@ -33,11 +33,11 @@ namespace LTX{
 
 	PosPlot::PosPlot(PosVisualizerPlugin* processor_)
 		: processor(processor_) {
-		paramLeft = reinterpret_cast<IntParameter*>(processor->getParameter("left"));
-		paramRight = reinterpret_cast<IntParameter*>(processor->getParameter("right"));
-		paramTop = reinterpret_cast<IntParameter*>(processor->getParameter("top"));
-		paramBottom = reinterpret_cast<IntParameter*>(processor->getParameter("bottom"));
-		paramPPM = reinterpret_cast<FloatParameter*>(processor->getParameter("ppm"));
+		paramLeft = dynamic_cast<IntParameter*>(processor->getParameter("left"));
+		paramRight = dynamic_cast<IntParameter*>(processor->getParameter("right"));
+		paramTop = dynamic_cast<IntParameter*>(processor->getParameter("top"));
+		paramBottom = dynamic_cast<IntParameter*>(processor->getParameter("bottom"));
+		paramPPM = dynamic_cast<FloatParameter*>(processor->getParameter("ppm"));
 	}
 
 	PosPlot::~PosPlot(){}
@@ -45,6 +45,11 @@ namespace LTX{
     void PosPlot::paint(Graphics& g)
     {
         const auto metadata = processor->getCameraMetadata();
+        if (!metadata->present && (!paramLeft || !paramRight || !paramTop || !paramBottom || !paramPPM)) {
+            g.setColour(Colours::white);
+            g.drawText("Waiting for position viewer settings", getLocalBounds(), Justification::centred);
+            return;
+        }
         if (metadata->present && !metadata->validWindow()) {
             g.setColour(Colours::white);
             g.drawText("Waiting for camera crop bounds", getLocalBounds(), Justification::centred);

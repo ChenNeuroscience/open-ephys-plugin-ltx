@@ -75,25 +75,27 @@ inline CameraMetadata readCameraMetadata(const DataStream* stream) {
     const int crop = stream->findMetadata(MetadataDescriptor::CHAR, 128, "camera_tracker.crop");
     const int frame = stream->findMetadata(MetadataDescriptor::INT32, 2, "camera_tracker.frame_size");
     result.present = ppm >= 0 || window >= 0 || crop >= 0 || frame >= 0;
-    if (ppm >= 0) {
+    if (ppm >= 0 && stream->getMetadataValue(ppm)) {
         result.hasPpm = true;
         stream->getMetadataValue(ppm)->getValue<double>(result.ppm);
     }
-    if (window >= 0) {
+    if (window >= 0 && stream->getMetadataValue(window)) {
         result.hasWindow = true;
         stream->getMetadataValue(window)->getValue<int32>(result.window.data());
     }
-    if (crop >= 0) {
-        char text[128]{};
-        stream->getMetadataValue(crop)->getValue<char>(static_cast<char*>(text));
-        const auto end = std::find(std::begin(text), std::end(text), '\0');
+    if (crop >= 0 && stream->getMetadataValue(crop)) {
+        // OE allocates length + 1 bytes for CHAR metadata and its pointer
+        // overload copies that entire allocation (129 bytes for CHAR[128]).
+        // The String overload reads at most the declared length instead.
+        String text;
+        stream->getMetadataValue(crop)->getValue(text);
         // Metadata belongs in a single header line, even for an unknown format.
-        result.cropText.assign(text, end);
+        result.cropText = text.toStdString();
         for (char& c : result.cropText) if (static_cast<unsigned char>(c) < 32 || c == 127) c = ' ';
         result.hasCrop = true;
         result.parseCrop();
     }
-    if (frame >= 0) {
+    if (frame >= 0 && stream->getMetadataValue(frame)) {
         result.hasFrame = true;
         stream->getMetadataValue(frame)->getValue<int32>(result.frame.data());
     }

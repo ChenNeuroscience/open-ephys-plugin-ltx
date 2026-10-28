@@ -21,8 +21,11 @@ parser.add_argument("--gui-source", type=Path)
 parser.add_argument("--compiler", default=os.environ.get("CXX", "clang++"))
 parser.add_argument("--keep-output", type=Path)
 parser.add_argument("--cmake", action="store_true", help="build using CMake, including MSVC on Windows")
+parser.add_argument("--native-api", type=Path, help="also run the real GUI metadata regression (requires --cmake)")
 parser.add_argument("--cmake-executable", default="cmake")
 args = parser.parse_args()
+if args.native_api and not args.cmake:
+    parser.error("--native-api requires --cmake")
 
 
 def read_file(path):
@@ -120,10 +123,16 @@ def run(work):
     compiler = args.compiler
     if args.cmake:
         build = work / "build"
-        subprocess.run([args.cmake_executable, "-S", str(ROOT / "Tests"), "-B", str(build)], check=True)
+        configure = [args.cmake_executable, "-S", str(ROOT / "Tests"), "-B", str(build)]
+        if args.native_api:
+            configure.append("-DLTX_GUI_SOURCE=" + str(args.native_api.resolve()))
+        subprocess.run(configure, check=True)
         subprocess.run([args.cmake_executable, "--build", str(build), "--config", "Release", "--parallel", "2"], check=True)
         candidates = [build / "Release" / exe.name, build / exe.name]
         exe = next(p for p in candidates if p.is_file())
+        if args.native_api:
+            native_exe = exe.with_name("native-metadata-test" + (".exe" if os.name == "nt" else ""))
+            subprocess.run([str(native_exe)], check=True, timeout=30)
         command = None
     elif Path(compiler).name.lower() in ("cl", "cl.exe"):
         command = [compiler, "/nologo", "/std:c++17", "/EHsc", "/MD", "/W4",
