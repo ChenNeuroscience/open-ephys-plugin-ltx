@@ -1,6 +1,10 @@
 name: Windows
 
 on:
+  workflow_dispatch:
+  pull_request:
+    paths-ignore:
+      - '**.md'
   push:
    # tirgger on pushes to main branch except when only documentation is changed
     branches:
@@ -12,42 +16,35 @@ on:
 jobs:
 
   build-windows:
-    runs-on: windows-latest
+    # Match the VS 2022 toolchain used by the pinned GUI import library.
+    runs-on: windows-2022
     permissions:
       contents: write
     steps:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    - name: Create and push tag
-      id: create_tag
-      run: |
-        git config user.name "github-actions"
-        git config user.email "github-actions@github.com"
-        TAG_NAME=$(git rev-parse --short HEAD)
-        echo "Pushing tag $TAG_NAME"
-        git tag $TAG_NAME
-        git push origin $TAG_NAME
-        echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
-      shell: bash
+    - name: Test timing diagnostics and camera metadata on Windows
+      run: python Tests/run_tests.py --cmake
+      shell: pwsh
     - name: setup
       run: |
         cd ../..
-        git clone https://github.com/open-ephys/plugin-GUI.git --branch main
-        cd plugin-GUI 
-        gh pr checkout 670
+        git clone https://github.com/ChenNeuroscience/open-ephys-main.git plugin-GUI --branch d728c1b2a --depth 1
+        cd plugin-GUI
         cd Build
         cmake -G "Visual Studio 17 2022" -A x64 .. 
         mkdir Release && cd Release
-        curl -L https://github.com/d1manson/open-ephys-main/releases/download/d728c1b2a/open-ephys-windows.zip --output open-ephys-windows.zip
+        curl -L https://github.com/ChenNeuroscience/open-ephys-main/releases/download/d728c1b2a/open-ephys-windows.zip --output open-ephys-windows.zip
         mkdir temp_dir
         powershell -Command "Expand-Archive -LiteralPath 'open-ephys-windows.zip' -DestinationPath './temp_dir'"
         mv temp_dir/open-ephys/open-ephys.lib ./open-ephys.lib
       shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
     - name: Add msbuild to PATH
       uses: microsoft/setup-msbuild@v2
+    - name: Test real GUI metadata API before acquisition
+      run: python Tests/run_tests.py --cmake --native-api ../../plugin-GUI
+      shell: pwsh
     - name: configure
       run: |
         cd Build
@@ -57,7 +54,25 @@ jobs:
       run: |
         msbuild Build/INSTALL.vcxproj -p:Configuration=Release -p:Platform=x64
       shell: cmd
+    - name: Upload Windows plugin
+      uses: actions/upload-artifact@v4
+      with:
+        name: LTX-1.1.0-Windows
+        path: Build/Release/open-ephys-plugin-ltx.dll
+        if-no-files-found: error
+    - name: Create and push tag
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      id: create_tag
+      run: |
+        git config user.name "github-actions"
+        git config user.email "github-actions@github.com"
+        TAG_NAME=$(git rev-parse --short HEAD)
+        git tag $TAG_NAME
+        git push origin $TAG_NAME
+        echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+      shell: bash
     - name: release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: ncipollo/release-action@v1
       with:
         artifacts: Build/Release/open-ephys-plugin-ltx.dll 

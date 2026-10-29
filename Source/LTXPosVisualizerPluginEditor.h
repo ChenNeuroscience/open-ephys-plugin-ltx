@@ -48,10 +48,13 @@ public:
 	Visualizer* createNewCanvas() override;
 
 	void buttonClicked(Button* button) override;
+    void refreshMetadataControls();
 
 private:
 
 	std::unique_ptr<UtilityButton> clearButton;
+    Label metadataLabel;
+    bool metadataControlsLocked = false;
 
 	/** Generates an assertion if this class leaks */
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PosVisualizerPluginEditor);

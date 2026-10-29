@@ -28,6 +28,7 @@
 #include <ProcessorHeaders.h>
 #include <VisualizerWindowHeaders.h>
 #include "LTXDisplayBuffer.h"
+#include "LTXCameraMetadata.h"
 
 namespace LTX {
 
@@ -42,7 +43,7 @@ struct PosPoint {
 	or an extended settings interface.
 */
 
-class PosVisualizerPlugin : public GenericProcessor
+class PosVisualizerPlugin : public GenericProcessor, private Timer
 {
 public:
 
@@ -115,6 +116,10 @@ public:
 
 	void parameterValueChanged(Parameter* param) override;
 
+    std::shared_ptr<const CameraMetadata> getCameraMetadata() const {
+        return std::atomic_load(&cameraMetadata);
+    }
+
 
 	/** Note how each of the data points here is individually atomic, so you can in principle see a partial update, but i don't think that hugely matters. **/
 	struct {
@@ -135,10 +140,16 @@ public:
 	std::atomic<bool> isRecording {false};
 
 private:
-    IntParameter* paramLeft;
-    IntParameter* paramRight;
-	IntParameter* paramTop;
-    IntParameter* paramBottom;
+    void timerCallback() override;
+    void refreshCameraMetadata();
+    std::shared_ptr<const CameraMetadata> cameraMetadata = std::make_shared<const CameraMetadata>();
+    std::array<int, 7> positionChannels{{-1, -1, -1, -1, -1, -1, -1}};
+    uint16 positionStreamId = 0;
+    bool hasPositionStream = false;
+    IntParameter* paramLeft = nullptr;
+    IntParameter* paramRight = nullptr;
+	IntParameter* paramTop = nullptr;
+    IntParameter* paramBottom = nullptr;
 
 	/** Generates an assertion if this class leaks */
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PosVisualizerPlugin);

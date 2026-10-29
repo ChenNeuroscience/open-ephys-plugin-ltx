@@ -36,7 +36,7 @@ PosVisualizerPlugin::PosVisualizerPlugin() : GenericProcessor("Pos Viewer")
 
 PosVisualizerPlugin::~PosVisualizerPlugin()
 {
-
+    stopTimer();
 }
 
 void PosVisualizerPlugin::registerParameters()
@@ -51,10 +51,10 @@ void PosVisualizerPlugin::registerParameters()
 
     addFloatParameter(Parameter::PROCESSOR_SCOPE, "ppm", "PPM", "Pixels Per Meter", "pixels", 400.0f, 100.0f, 1000.0f, 0.1, false);
 
-    paramLeft = reinterpret_cast<IntParameter*>(getParameter("left"));
-    paramRight = reinterpret_cast<IntParameter*>(getParameter("right"));
-    paramTop = reinterpret_cast<IntParameter*>(getParameter("top"));
-    paramBottom = reinterpret_cast<IntParameter*>(getParameter("bottom"));
+    paramLeft = dynamic_cast<IntParameter*>(getParameter("left"));
+    paramRight = dynamic_cast<IntParameter*>(getParameter("right"));
+    paramTop = dynamic_cast<IntParameter*>(getParameter("top"));
+    paramBottom = dynamic_cast<IntParameter*>(getParameter("bottom"));
 
 }
 
@@ -67,10 +67,51 @@ AudioProcessorEditor* PosVisualizerPlugin::createEditor()
 
 void PosVisualizerPlugin::updateSettings()
 {
+    hasPositionStream = false;
+    positionChannels.fill(-1);
+    for (const DataStream* stream : getDataStreams()) {
+        if (!stream) continue;
+        if (stream->getName() != "bonsai") continue;
+        int count = 0;
+        for (int i = 0; i < continuousChannels.size(); ++i) {
+            if (continuousChannels[i] && continuousChannels[i]->getStreamId() == stream->getStreamId()) {
+                if (count < 7) positionChannels[count] = i;
+                ++count;
+            }
+        }
+        if (count == 7) {
+            positionStreamId = stream->getStreamId();
+            hasPositionStream = true;
+            break;
+        }
+    }
+    refreshCameraMetadata();
+    startTimer(250); // The camera rewrites shared metadata on the message thread.
 }
 
+void PosVisualizerPlugin::refreshCameraMetadata() {
+    CameraMetadata next;
+    if (hasPositionStream) {
+        for (const DataStream* stream : getDataStreams())
+            if (stream && stream->getStreamId() == positionStreamId) next = readCameraMetadata(stream);
+    }
+    const auto previous = getCameraMetadata();
+    if (previous->present != next.present || previous->window != next.window || previous->cropText != next.cropText)
+        recordingBuffer.clear(); // Do not mix paths from different arenas.
+    std::atomic_store(&cameraMetadata, std::make_shared<const CameraMetadata>(next));
+    for (const char* name : {"left", "right", "top", "bottom", "ppm"}) {
+        if (auto* parameter = getParameter(name))
+            if (parameter->isEnabled() == next.present) parameter->setEnabled(!next.present);
+    }
+    if (previous->present && !next.present) parameterValueChanged(nullptr);
+    if (auto* posEditor = dynamic_cast<PosVisualizerPluginEditor*>(editor.get()))
+        posEditor->refreshMetadataControls();
+}
+
+void PosVisualizerPlugin::timerCallback() { refreshCameraMetadata(); }
 
 void PosVisualizerPlugin::startRecording() {
+    refreshCameraMetadata();
     isRecording = true;
     recordingBuffer.clear();
 }
@@ -86,41 +127,38 @@ void PosVisualizerPlugin::clearRecording() {
 
 void PosVisualizerPlugin::process(AudioBuffer<float>& buffer)
 {
-    const float left = static_cast<float>(paramLeft->getValue());
-    const float right = static_cast<float>(paramRight->getValue());
-    const float top = static_cast<float>(paramTop->getValue());
-    const float bottom = static_cast<float>(paramBottom->getValue());
-
-    const float width = right - left;
-    const float height = bottom - top;
-
-    for (auto stream : getDataStreams())
+    if (hasPositionStream)
     {
-        const uint32 numSamples = getNumSamplesInBlock(stream->getStreamId());
+        const uint32 numSamples = getNumSamplesInBlock(positionStreamId);
         if (numSamples == 0) {
             return;
         }
+        // Reject incomplete mappings and transiently smaller buffers during
+        // signal-chain reconfiguration before taking any channel pointers.
+        if (numSamples > static_cast<uint32>(buffer.getNumSamples())) return;
+        for (int channel : positionChannels)
+            if (channel < 0 || channel >= buffer.getNumChannels()) return;
 
         if (isRecording) {
-            // store x1 and y1 values into recordingBuffer, clamped to [0, width] x [0, height], ignoring NaN values
-            auto x1_buffer = buffer.getReadPointer(ChannelMapping::x1);
-            auto y1_buffer = buffer.getReadPointer(ChannelMapping::y1);
+            // Keep camera coordinates; the canvas applies the current crop.
+            auto x1_buffer = buffer.getReadPointer(positionChannels[ChannelMapping::x1]);
+            auto y1_buffer = buffer.getReadPointer(positionChannels[ChannelMapping::y1]);
             
             for (int i = 0; i < numSamples; i++) {
-                PosPoint point {clamp(x1_buffer[i] - left, 0.f, width), clamp(y1_buffer[i] - top, 0.f, height)};
-                recordingBuffer.write(point, !std::isnan(x1_buffer[i]));
+                PosPoint point {x1_buffer[i], y1_buffer[i]};
+                recordingBuffer.write(point, std::isfinite(point.x) && std::isfinite(point.y));
             }
 
         }
 
-        // get the last value into latestPosSamp, clamped to [0, width] x [0, height]
-        latestPosSamp.timestamp = buffer.getReadPointer(ChannelMapping::Timestamp)[numSamples-1];
-        latestPosSamp.x1 = clamp(buffer.getReadPointer(ChannelMapping::x1)[numSamples-1] - left, 0.f, width);
-        latestPosSamp.y1 = clamp(buffer.getReadPointer(ChannelMapping::y1)[numSamples-1] - top, 0.f, height);
-        latestPosSamp.x2 = clamp(buffer.getReadPointer(ChannelMapping::x2)[numSamples-1] - left, 0.f, width);
-        latestPosSamp.y2 = clamp(buffer.getReadPointer(ChannelMapping::y2)[numSamples-1] - top, 0.f, height);
-        latestPosSamp.numpix1 = buffer.getReadPointer(ChannelMapping::numpix1)[numSamples-1];
-        latestPosSamp.numpix2 = buffer.getReadPointer(ChannelMapping::numpix2)[numSamples-1];
+        // Keep the newest sample in camera coordinates.
+        latestPosSamp.timestamp = buffer.getReadPointer(positionChannels[ChannelMapping::Timestamp])[numSamples-1];
+        latestPosSamp.x1 = buffer.getReadPointer(positionChannels[ChannelMapping::x1])[numSamples-1];
+        latestPosSamp.y1 = buffer.getReadPointer(positionChannels[ChannelMapping::y1])[numSamples-1];
+        latestPosSamp.x2 = buffer.getReadPointer(positionChannels[ChannelMapping::x2])[numSamples-1];
+        latestPosSamp.y2 = buffer.getReadPointer(positionChannels[ChannelMapping::y2])[numSamples-1];
+        latestPosSamp.numpix1 = buffer.getReadPointer(positionChannels[ChannelMapping::numpix1])[numSamples-1];
+        latestPosSamp.numpix2 = buffer.getReadPointer(positionChannels[ChannelMapping::numpix2])[numSamples-1];
         return; // should only be one data stream
     }
 
@@ -157,11 +195,14 @@ void PosVisualizerPlugin::loadCustomParametersFromXml(XmlElement* parentElement)
 
 
 void PosVisualizerPlugin::parameterValueChanged(Parameter* param) {
+    if (getCameraMetadata()->present) return;
+    auto* ppm = getParameter("ppm");
+    if (!paramLeft || !paramRight || !paramTop || !paramBottom || !ppm) return;
     LTX::SharedState::window_min_x = paramLeft->getValue();
     LTX::SharedState::window_max_x = paramRight->getValue();
     LTX::SharedState::window_min_y = paramTop->getValue();
     LTX::SharedState::window_max_y = paramBottom->getValue();
-    LTX::SharedState::pixels_per_metre = getParameter("ppm")->getValue();
+    LTX::SharedState::pixels_per_metre = ppm->getValue();
 };
 
 }

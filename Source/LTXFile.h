@@ -8,6 +8,8 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <map>
+#include <string>
 
 namespace LTX {
 
@@ -37,6 +39,10 @@ namespace LTX {
         void AddHeaderValue(const std::string& key, T value);
         void AddHeaderPlaceholder(const std::string& key);
 
+        // Fixed-width diagnostic headers can be updated after binary writes.
+        void AddDeferredHeader(const std::string& key);
+        void UpdateDeferredHeader(const std::string& key, const std::string& value);
+
         template <typename T>
         void FinaliseHeaderPlaceholder(T value);
 
@@ -54,6 +60,7 @@ namespace LTX {
 
         long headerOffsetCustom = 0;
         long headerOffsetDuration = 0;
+        std::map<std::string, long> deferredHeaders;
         FILE* theFile = nullptr;
         FileWriteStatus status = FileWriteStatus::HEADERS;
         std::chrono::system_clock::time_point start_tm;
