@@ -125,7 +125,7 @@ def run(work):
         build = work / "build"
         configure = [args.cmake_executable, "-S", str(ROOT / "Tests"), "-B", str(build)]
         if args.native_api:
-            configure.append("-DLTX_GUI_SOURCE=" + str(args.native_api.resolve()))
+            configure.append("-DLTX_GUI_SOURCE=" + args.native_api.resolve().as_posix())
         subprocess.run(configure, check=True)
         subprocess.run([args.cmake_executable, "--build", str(build), "--config", "Release", "--parallel", "2"], check=True)
         candidates = [build / "Release" / exe.name, build / exe.name]

@@ -16,6 +16,7 @@ endif()
 # Optional regression against the GUI's real metadata allocation/copy code.
 # No GUI application or hardware is needed to exercise pre-acquisition reads.
 if(LTX_GUI_SOURCE)
+    file(TO_CMAKE_PATH "${LTX_GUI_SOURCE}" LTX_GUI_SOURCE)
     set(JUCE_CORE "${LTX_GUI_SOURCE}/JuceLibraryCode/modules/juce_core")
     if(APPLE)
         enable_language(OBJCXX)
