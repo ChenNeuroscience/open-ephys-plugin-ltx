@@ -331,12 +331,123 @@ static void fractionalRate(const std::filesystem::path& root) {
     assert(CoreServices::stopRequests == 0);
 }
 
+static void positionChunks(const std::filesystem::path& root, const std::string& name, int firstChunk, bool ragged = false, bool incomplete = false, bool badTime = false) {
+    const auto folder = root / name;
+    std::filesystem::create_directories(folder);
+    CoreServices::recordingName = name;
+    CoreServices::stopRequests = 0;
+    RecordNode node;
+    CoreServices::nodes = {{10, &node}};
+    LTX::RecordEnginePlugin engine;
+    configure(engine, node, 0);
+    engine.openFiles(File(folder / "node"), 1, 0);
+    engine.writeTimestampSyncText(nullptr, epochMs, 0, "Software Time (");
+    DataStream stream("bonsai");
+    engine.writeTimestampSyncText(&stream, 0, 100, "Start Time");
+    double times[8];
+    for (int i = 0; i < 8; ++i) times[i] = 100 + i / 50.0;
+    for (int channel = 0; channel < 7; ++channel) {
+        float values[8];
+        for (int i = 0; i < 8; ++i) values[i] = channel == 0 ? 12 + i / 50.0f : float(channel * 100 + i);
+        // Exact RecordThread order at a circular-buffer boundary: both parts
+        // of this channel are delivered before moving to the next channel.
+        const int split = ragged ? 1 + channel % 6 : firstChunk;
+        double channelTimes[8];
+        std::copy(std::begin(times), std::end(times), channelTimes);
+        if (badTime && channel == 3) channelTimes[0] += 0.02;
+        engine.writeContinuousData(channel, channel, values, channelTimes, split);
+        engine.writeContinuousData(channel, channel, values + split, channelTimes + split,
+                                   8 - split - (incomplete && channel == 6 ? 1 : 0));
+    }
+    engine.closeFiles();
+    assert((CoreServices::stopRequests > 0) == (incomplete || badTime));
+}
+
+static void longPositionRecording(const std::filesystem::path& root) {
+    const auto folder = root / "pos-long";
+    std::filesystem::create_directories(folder);
+    CoreServices::recordingName = "pos-long";
+    CoreServices::stopRequests = 0;
+    RecordNode node;
+    CoreServices::nodes = {{10, &node}};
+    LTX::RecordEnginePlugin engine;
+    configure(engine, node, 0);
+    engine.openFiles(File(folder / "node"), 1, 0);
+    engine.writeTimestampSyncText(nullptr, epochMs, 0, "Software Time (");
+    DataStream stream("bonsai");
+    engine.writeTimestampSyncText(&stream, 0, 100, "Start Time");
+    constexpr int total = 60007, batch = 7, capacity = 64 * 300;
+    for (int at = 0; at < total; at += batch) {
+        const int count = std::min(batch, total - at);
+        const int first = std::min(count, capacity - at % capacity);
+        double times[batch];
+        for (int i = 0; i < count; ++i) times[i] = 100 + (at + i) / 50.0;
+        for (int channel = 0; channel < 7; ++channel) {
+            float values[batch];
+            for (int i = 0; i < count; ++i) values[i] = channel == 0 ? float(12 + (at + i) / 50.0)
+                : float(channel * 100 + (at + i) % 100);
+            engine.writeContinuousData(channel, channel, values, times, first);
+            engine.writeContinuousData(channel, channel, values + first, times + first, count - first);
+        }
+    }
+    // Enough binary data has been written to flush the header to disk. The
+    // timing fields must still be provisional; data delivery performs no timing
+    // rewrites. Final values are checked by the file parser after close.
+    std::ifstream live(folder.string() + ".pos", std::ios::binary);
+    std::string prefix(4096, '\0');
+    live.read(prefix.data(), std::streamsize(prefix.size()));
+    assert(prefix.find("record_node_start_offset_ms unavailable") != std::string::npos);
+    engine.closeFiles();
+    assert(CoreServices::stopRequests == 0);
+}
+
+static void headerUpdates(const std::filesystem::path& root) {
+    const auto start = std::chrono::system_clock::now();
+    LTX::LTXFile file((root / "headers").string(), ".test", start);
+    file.AddHeaderValue("literal", "100% literal");
+    file.ReserveHeader("count", "0");
+    file.ReserveHeader("note", "a longer initial value");
+    file.UpdateHeader("count", std::numeric_limits<std::uint64_t>::max());
+    const unsigned char first[] = {0, 1, 37, 10, 13, 255};
+    file.WriteBinaryData(first, sizeof(first));
+    file.UpdateHeader("note", "x"); // clears the remaining reserved space
+    bool rejected = false;
+    try { file.UpdateHeader("note", std::string(33, 'x')); } catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+    rejected = false;
+    try { file.UpdateHeader("unknown", 1); } catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+    rejected = false;
+    try { file.ReserveHeader("late"); } catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+    const unsigned char second[] = {3, 2, 1};
+    file.WriteBinaryData(second, sizeof(second)); // position restored after header updates
+    file.UpdateHeader("note", "ok");
+    file.FinaliseFile(start + std::chrono::seconds(7));
+    file.FinaliseFile(start + std::chrono::seconds(9)); // does not append another footer
+    rejected = false;
+    try { file.UpdateHeader("count", 1); } catch (const std::runtime_error&) { rejected = true; }
+    assert(rejected);
+    LTX::LTXFile empty((root / "headers-empty").string(), ".test", start);
+    empty.ReserveHeader("count", "0");
+    empty.UpdateHeader("count", 42);
+    empty.FinaliseFile(start);
+}
+
 int main(int argc, char** argv) {
     assert(argc == 2);
     const std::filesystem::path root(argv[1]);
     coordinatorTests();
     metadataTests();
     fractionalRate(root);
+    positionChunks(root, "pos-unsplit", 8);
+    positionChunks(root, "pos-wrapped", 3);
+    positionChunks(root, "pos-equal-wrap", 4);
+    positionChunks(root, "pos-ragged", 3, true);
+    positionChunks(root, "pos-incomplete", 3, false, true);
+    positionChunks(root, "pos-badtime", 3, false, false, true);
+    longPositionRecording(root);
+    headerUpdates(root);
     std::array<int, 3> order{0, 1, 2};
     int count = 0;
     do {

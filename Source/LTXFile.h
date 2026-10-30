@@ -1,75 +1,64 @@
-
-
 #ifndef LTXFILE_HEADER_H
 #define LTXFILE_HEADER_H
 
-#include <stdio.h>
-#include <vector>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <iomanip>
+#include <locale>
+#include <map>
 #include <memory>
 #include <mutex>
-#include <map>
+#include <sstream>
 #include <string>
 
 namespace LTX {
 
-    class LTXFile
-    {
-        /*
-          Writing the file goes through various stages:
-            You can call AddHeaderValue zero or more times, and at any point within
-              that call AddHeaderPlaceholder zero or one times (i.e. only one header can be a palceholder).
-            You can next call WriteBinaryData zero or more times.
-            You can next call FinaliseHeaderPlaceholder zero or one times.
-            You should always finish by calling FinaliseFile exactly once.
-          To enforce this order is not violated a status is tacked within the class.
+// Headers are followed by optional binary data. Any reserved header (including
+// duration and sample counts) may be updated until FinaliseFile closes the file.
+class LTXFile {
+public:
+    LTXFile(const std::string& basePath, const std::string& extension,
+            std::chrono::system_clock::time_point start);
+    ~LTXFile() = default;
 
-          All these methods are guarded by a mutex, which makes them thread-safe though
-          not carefully optimised for multi-threaded use.
-        */
+    template <class T> void AddHeaderValue(const std::string& key, const T& value) {
+        addHeaderText(key, format(value));
+    }
+    void ReserveHeader(const std::string& key, const std::string& initial = "unavailable");
+    template <class T> void UpdateHeader(const std::string& key, const T& value) {
+        std::lock_guard<std::mutex> lock(mutex);
+        updateHeaderText(key, format(value));
+    }
+    void WriteBinaryData(const void* buffer, std::size_t bytes);
+    void FinaliseFile(std::chrono::system_clock::time_point end);
 
-    
+private:
+    enum class Status { Headers, Binary, Closed };
+    static constexpr std::size_t reservedWidth = 32;
+    using Offset = std::int64_t;
 
-    public:
+    template <class T> static std::string format(const T& value) {
+        std::ostringstream text;
+        text.imbue(std::locale::classic());
+        text << std::setprecision(17) << value;
+        return text.str();
+    }
+    void addHeaderText(const std::string& key, const std::string& value);
+    void updateHeaderText(const std::string& key, const std::string& value);
+    void writeBytes(const void* data, std::size_t bytes);
+    void writeText(const std::string& text);
+    Offset tell() const;
+    void seek(Offset offset);
+    [[noreturn]] void ioError(const std::string& operation) const;
 
-        LTXFile(const std::string& basePath, const std::string& extension, std::chrono::system_clock::time_point start_tm);
-        ~LTXFile();
-
-        template <typename T>
-        void AddHeaderValue(const std::string& key, T value);
-        void AddHeaderPlaceholder(const std::string& key);
-
-        // Fixed-width diagnostic headers can be updated after binary writes.
-        void AddDeferredHeader(const std::string& key);
-        void UpdateDeferredHeader(const std::string& key, const std::string& value);
-
-        template <typename T>
-        void FinaliseHeaderPlaceholder(T value);
-
-        void WriteBinaryData(void* buffer, size_t totalBytes);
-
-        void FinaliseFile(std::chrono::system_clock::time_point end_tm);
-
-    private:
-        enum FileWriteStatus {
-            HEADERS,
-            BINARY,
-            EPILOGUE,
-            CLOSED
-        };
-
-        long headerOffsetCustom = 0;
-        long headerOffsetDuration = 0;
-        std::map<std::string, long> deferredHeaders;
-        FILE* theFile = nullptr;
-        FileWriteStatus status = FileWriteStatus::HEADERS;
-        std::chrono::system_clock::time_point start_tm;
-
-        std::mutex mut;
-
-    };
+    const std::string path;
+    const std::chrono::system_clock::time_point start;
+    std::unique_ptr<std::FILE, decltype(&std::fclose)> file{nullptr, &std::fclose};
+    Status status = Status::Headers;
+    bool firstHeader = true;
+    std::map<std::string, Offset> reservedHeaders;
+    std::mutex mutex;
+};
 }
-
-
-
-#endif // LTXFILE_HEADER_H
+#endif

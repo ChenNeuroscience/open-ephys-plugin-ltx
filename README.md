@@ -34,9 +34,9 @@ This is **diagnostic only**. LTX does not pad data, shift timestamps, or change 
 | `startup_timing_correction_applied` | `0` |
 | `startup_timing_status` | `measured_uncorrected`, or `unavailable` if the measurement cannot be resolved |
 
-Diagnostic headers use fixed-width fields, updated in place after the timing messages arrive and at close. Unresolved values say `unavailable`, never zero. Missing or duplicate software-time messages leave recording data intact and produce a warning at close. Repeated recordings get separate coordinator state. Empty nodes are excluded when identified. Recording never waits for other nodes' timing messages.
+Diagnostic headers use fixed-width fields, finalized once at close. Until then they remain provisional (`unavailable`). Timing-message delivery triggers warnings; ordinary continuous/spike/TTL writes do not inspect coordinator state or rewrite diagnostic headers. Unresolved values say `unavailable`, never zero. Missing or duplicate software-time messages leave recording data intact and produce a warning at close. Repeated recordings get separate coordinator state. Empty nodes are excluded when identified. Recording never waits for other nodes' timing messages.
 
-Each node also writes `experiment_name.timing-NODE_ID.json` with participant origins/modes, the estimated discrepancy, `timing_available`, `correction_applied: false`, and data completion/error state. Actual data integrity failures, such as a missing native stream origin, still request a recording stop. Initial data waiting for its own native stream origin is bounded to 256 MiB; software-clock diagnostics do not gate data writing.
+Each node also writes `experiment_name.timing-NODE_ID.json` with participant origins/modes, the estimated discrepancy, `timing_available`, `correction_applied: false`, and data completion/error state. Actual data integrity failures, such as a missing native stream origin, still request a recording stop. Initial data waiting for its own native stream origin is bounded to 256 MiB; software-clock diagnostics do not gate data writing. Once the native origin arrives, continuous/spike/TTL writes bypass the startup staging queue, avoiding repeated vector copies and deferred callbacks.
 
 The measurement cannot establish camera exposure latency, USB/OSC backlog, hardware clock drift, or wall-clock adjustments. Paired LED/TTL events on the Windows acquisition machine remain the alignment check. This covers LTX engines in the same loaded plugin, not other recording engines. Nodes writing the same file type still require distinct output basenames.
 
@@ -67,6 +67,18 @@ The usual `window_*` and `min/max_*` headers use the same encoded coordinate sys
 Nonfinite/invalid coordinates become `1023`. Areas remain actual camera pixel counts, independent of coordinate scaling, saturating at 65535 instead of wrapping; nonfinite/nonpositive areas become zero. Positive fractional areas are at least one. `position_area_units camera_pixels_saturated_uint16` documents this distinction. Missing timestamps receive the local sample-grid time; real camera timestamp differences are retained. Fractional stream rates such as 29.97 Hz are preserved.
 
 Without metadata, the recorder retains legacy coordinate mapping and reads bounds/PPM from the shared viewer configuration (`position_metadata_source legacy_viewer`); the viewer controls remain editable. Incomplete metadata with invalid bounds preserves the supplied fields but falls back to legacy bounds/mapping with a warning. Such fallback cannot disambiguate a real raw coordinate of 1023. An explicitly uncalibrated stream stores NaN PPM, rather than silently inventing calibration.
+
+## Position recording across buffer wraps (1.1.1)
+
+Open Ephys can deliver two pieces of one channel consecutively when its recording queue wraps: `timestamp-tail, timestamp-head, x1-tail, x1-head, ...`. Channels may also arrive in different-sized pieces. The recorder now assembles complete rows across these callbacks and checks that their native timestamps agree. It no longer assumes that one callback from each of the seven channels makes a complete block.
+
+The earlier implementation replaced its timestamp rows on each timestamp callback. At a wrap, it could discard the first piece, then reject the next coordinate piece as inconsistent. Before that check was added, the same assumption could overwrite rows or write beyond a vector's logical size. Simply removing the check would preserve the data-corruption risk.
+
+The queue in GUI release `d728c1b2a` holds `audio_buffer_size * 300` samples per recorded channel. At 50 Hz, a 64-sample audio buffer wraps every 384 seconds (6 min 24 s); a 1024-sample buffer wraps every 6144 seconds. A split read depends on batching at the boundary, so a wrap does not invariably trigger the old failure. This provides a reproducible mechanism for a delayed failure; the affected rig's audio buffer size is still needed to match its reported seven-minute interval.
+
+Complete rows retain the existing position timestamp/coordinate encoding. Genuine native timestamp disagreements, excessive unmatched rows (more than 65,536), and incomplete rows at close still report an error instead of shifting channels silently. Startup timing remains diagnostic only.
+
+`LTXFile` uses one `ReserveHeader` / `UpdateHeader` mechanism for duration, sample counts, and timing diagnostics. Fixed-width replacements preserve the binary file position and reject overlong values; binary writes and close check errors. File ownership is automatic, trial-date conversion is thread-safe, and file positions use 64-bit APIs on Windows.
 
 ## The plugins here
 
@@ -108,7 +120,7 @@ python3 Tests/run_tests.py
 python Tests/run_tests.py --cmake
 ```
 
-These tests compile `LTXRecordEnginePlugin.cpp` and `LTXFile.cpp` with small API substitutes, then parse the resulting binary files. They cover all six start orders, unchanged binary payloads across discrepancies, reversed callback delivery, repeated recordings, downsampling phase, warning thresholds, missing timing messages, metadata/source headers, crop geometry, coordinate transforms, and safe area encoding. To also compile-check against an already configured copy of the exact GUI headers:
+These tests compile `LTXRecordEnginePlugin.cpp` and `LTXFile.cpp` with small API substitutes, then parse the resulting binary files. They cover all six start orders, unchanged binary payloads across discrepancies, reversed callback delivery, repeated recordings, downsampling phase, warning thresholds, missing timing messages, metadata/source headers, crop geometry, coordinate transforms, safe area encoding, split/ragged channel delivery, and a simulated 20-minute recording across three buffer wraps. Reserved-header checks verify updates around binary writes and byte-for-byte payload preservation. To also compile-check against an already configured copy of the exact GUI headers:
 
 ```sh
 python3 Tests/run_tests.py --gui-source /path/to/open-ephys-main
@@ -116,13 +128,13 @@ python3 Tests/run_tests.py --gui-source /path/to/open-ephys-main
 
 Windows CI runs the same file-level tests and builds the plugin against release `d728c1b2a`. PR/manual builds do not create releases. Windows GUI/hardware LED–TTL validation remains a separate integration check.
 
-The metadata regression can also link the GUI's actual `Metadata.cpp` and JUCE core:
+The native regressions also link the GUI's actual `Metadata.cpp`, `DataQueue.cpp`, and JUCE modules:
 
 ```sh
 python3 Tests/run_tests.py --cmake --native-api /path/to/open-ephys-main
 ```
 
-This checks a metadata read before acquisition, including the GUI's extra byte for `CHAR` fields, full-length crop text, and unknown crop formats. The viewer and recorder use the bounded `String` getter; the pointer getter copies 129 bytes for a declared `CHAR[128]` field. Windows CI runs this regression against the pinned GUI sources.
+These exercise the actual recording queue across three wraps and check a metadata read before acquisition, including the GUI's extra byte for `CHAR` fields, full-length crop text, and unknown crop formats. The viewer and recorder use the bounded `String` getter; the pointer getter copies 129 bytes for a declared `CHAR[128]` field. Windows CI runs this regression against the pinned GUI sources.
 
 ## Troubleshooting a viewer crash on Windows
 

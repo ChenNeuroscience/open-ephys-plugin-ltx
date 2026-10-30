@@ -196,12 +196,42 @@ def run(work):
     verify_camera(output, "camera")
     verify_camera(output, "camera-uncalibrated", uncalibrated=True)
     verify_camera(output, "camera-unknown-bounds", uncalibrated=True, unknown=True)
+    reference = read_file(output / "pos-unsplit.pos")[1]
+    expected_rows = list(struct.iter_unpack(">i8H", reference))
+    assert len(expected_rows) == 8
+    for i, row in enumerate(expected_rows):
+        assert row[1:7] == tuple(c * 100 + i for c in range(1, 7))
+    for name in ("pos-wrapped", "pos-equal-wrap", "pos-ragged"):
+        header, payload = read_file(output / (name + ".pos"))
+        assert int(header["num_pos_samples"]) == 8 and payload == reference, name
+    meta = json.loads((output / "pos-incomplete.timing-10.json").read_text())
+    assert not meta["complete"] and "incomplete rows" in meta["error"]
+    header, payload = read_file(output / "pos-incomplete.pos")
+    assert int(header["num_pos_samples"]) == 7 and payload == reference[:7 * 20]
+    meta = json.loads((output / "pos-badtime.timing-10.json").read_text())
+    assert not meta["complete"] and "native timestamps disagree" in meta["error"]
+    header, payload = read_file(output / "pos-long.pos")
+    assert int(header["num_pos_samples"]) == 60007
+    assert int(header["record_node_start_offset_ms"]) == 0
+    for i, row in enumerate(struct.iter_unpack(">i8H", payload)):
+        camera_time = struct.unpack("f", struct.pack("f", 12 + i / 50))[0]
+        assert abs(row[0] - (camera_time - 12) * 96000) <= 0.5
+        assert row[1:7] == tuple(c * 100 + i % 100 for c in range(1, 7))
+    header, payload = read_file(output / "headers.test")
+    assert header["literal"] == "100% literal"
+    assert int(header["duration"]) == 7 and int(header["count"]) == 2**64 - 1
+    assert header["note"].strip() == "ok"
+    assert payload == bytes((0, 1, 37, 10, 13, 255, 3, 2, 1))
+    header, payload = read_file(output / "headers-empty.test")
+    assert int(header["count"]) == 42 and payload == b""
     if args.keep_output:
         shutil.copytree(output, args.keep_output, dirs_exist_ok=True)
     print("PASS: all six recorder orders, reversed callbacks, repeat recordings, >50 ms warnings,")
     print("      unchanged binary data across start discrepancies, missing/duplicate software anchors,")
     print("      camera metadata/source headers, crop geometry, coordinate scaling, safe uint16 areas,")
-    print("      NaNs/infinities, legacy fallback, sample phase, native-origin/staging failure checks.")
+    print("      NaNs/infinities, legacy fallback, sample phase, native-origin/staging failure checks,")
+    print("      split/ragged channels, 20-minute position run across three wraps, incomplete-row checks,")
+    print("      reserved headers before/after data, range checks, cursor restoration, and one footer.")
 
 
 with tempfile.TemporaryDirectory(prefix="ltx-timing-tests-") as folder:
