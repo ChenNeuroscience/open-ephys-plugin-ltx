@@ -120,6 +120,7 @@ def verify_camera(output, name, uncalibrated=False, unknown=False):
 def run(work):
     exe = work / ("recording-timing-test.exe" if os.name == "nt" else "recording-timing-test")
     sources = [ROOT / "Tests/recording_timing_test.cpp", ROOT / "Source/LTXRecordEnginePlugin.cpp", ROOT / "Source/LTXFile.cpp"]
+    trace_path = None
     compiler = args.compiler
     if args.cmake:
         build = work / "build"
@@ -132,7 +133,8 @@ def run(work):
         exe = next(p for p in candidates if p.is_file())
         if args.native_api:
             native_exe = exe.with_name("native-metadata-test" + (".exe" if os.name == "nt" else ""))
-            subprocess.run([str(native_exe)], check=True, timeout=30)
+            trace_path = work / "native-queue.bin"
+            subprocess.run([str(native_exe), str(trace_path)], check=True, timeout=30)
         command = None
     elif Path(compiler).name.lower() in ("cl", "cl.exe"):
         command = [compiler, "/nologo", "/std:c++17", "/EHsc", "/MD", "/W4",
@@ -147,7 +149,7 @@ def run(work):
         subprocess.run(command, cwd=work, check=True)
     output = work / "output"
     output.mkdir()
-    subprocess.run([str(exe), str(output)], check=True, timeout=30)
+    subprocess.run([str(exe), str(output), *([str(trace_path)] if trace_path else [])], check=True, timeout=30)
     for number, order in enumerate(itertools.permutations(range(3))):
         delays = [0, 0, 0]
         for rank, mode in enumerate(order):
@@ -224,6 +226,27 @@ def run(work):
     assert payload == bytes((0, 1, 37, 10, 13, 255, 3, 2, 1))
     header, payload = read_file(output / "headers-empty.test")
     assert int(header["count"]) == 42 and payload == b""
+    if trace_path:
+        for suffix in ("", " r2"):
+            header, payload = read_file(output / ("queue-replay" + suffix + ".pos"))
+            assert int(header["num_pos_samples"]) == 57613
+            if not suffix:
+                assert payload == read_file(output / "pos-long.pos")[1][:57613 * 20]
+            else:
+                for i, row in enumerate(struct.iter_unpack(">i8H", payload)):
+                    camera_time = struct.unpack("f", struct.pack("f", 12 + i / 50))[0]
+                    continued_time = struct.unpack("f", struct.pack("f", camera_time + 2000))[0]
+                    assert abs(row[0] - (continued_time - 2012) * 96000) <= 0.5
+                    assert row[1:7] == tuple(c * 100 + i % 100 for c in range(1, 7))
+        header, payload = read_file(output / "queue-trim.pos")
+        assert int(header["num_pos_samples"]) == 57613 - 19199
+        first_time = struct.unpack("f", struct.pack("f", 12 + 19199 / 50))[0]
+        for at, row in enumerate(struct.iter_unpack(">i8H", payload), start=19199):
+            camera_time = struct.unpack("f", struct.pack("f", 12 + at / 50))[0]
+            assert abs(row[0] - (camera_time - first_time) * 96000) <= 0.5
+            assert row[1:7] == tuple(c * 100 + at % 100 for c in range(1, 7))
+        print("PASS: real GUI queue deliveries replayed through production writer, repeat recording,")
+        print("      interleaved producer/reader, startup sync after data, and start trimming across a wrap.")
     if args.keep_output:
         shutil.copytree(output, args.keep_output, dirs_exist_ok=True)
     print("PASS: all six recorder orders, reversed callbacks, repeat recordings, >50 ms warnings,")

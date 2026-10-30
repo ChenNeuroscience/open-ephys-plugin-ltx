@@ -134,7 +134,15 @@ The native regressions also link the GUI's actual `Metadata.cpp`, `DataQueue.cpp
 python3 Tests/run_tests.py --cmake --native-api /path/to/open-ephys-main
 ```
 
-These exercise the actual recording queue across three wraps and check a metadata read before acquisition, including the GUI's extra byte for `CHAR` fields, full-length crop text, and unknown crop formats. The viewer and recorder use the bounded `String` getter; the pointer getter copies 129 bytes for a declared `CHAR[128]` field. Windows CI runs this regression against the pinned GUI sources.
+These exercise the actual recording queue across three wraps, including reads between producer channel writes. The resulting deliveries are replayed through the complete production record engine and the saved bytes are checked, including repeated recording with continuing clocks and start trimming across a split block. They also check a metadata read before acquisition, including the GUI's extra byte for `CHAR` fields, full-length crop text, and unknown crop formats. The viewer and recorder use the bounded `String` getter; the pointer getter copies 129 bytes for a declared `CHAR[128]` field. Windows CI runs these regressions against the pinned GUI sources.
+
+The remaining Windows integration checks need the packaged GUI and the experimental signal chain:
+
+- Add/remove Pos Viewer and reload the saved configuration before acquisition, with both legacy Bonsai and Camera sources.
+- Acquire for several minutes, then start/stop several recordings without stopping acquisition; include a new recording folder and run through several queue wraps.
+- Stop recording just before/after a wrap and check all output counts, footers, and timing headers. Compare matched LED/TTL events near both ends of the recording.
+
+The native regressions execute real GUI components, but do not launch the application, exercise its complete graph/control-thread lifecycle, or validate hardware timing.
 
 ## Troubleshooting a viewer crash on Windows
 
