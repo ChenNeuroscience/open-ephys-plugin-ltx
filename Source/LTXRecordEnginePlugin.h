@@ -28,6 +28,7 @@
 #include "LTXFile.h"
 #include "LTXRecordingTiming.h"
 #include "LTXCameraMetadata.h"
+#include "LTXPositionAssembler.h"
 
 
 #include <stdio.h>
@@ -114,36 +115,40 @@ namespace LTX {
 
         // this relates to the hacky timestamp encoded in one of the voltage streams not the proper timestamp data
         double posFirstTimestamp = TIMESTAMP_UNINITIALIZED; 
-        uint64 posRealSampCount = 0;
         CameraMetadata cameraMetadata;
         PositionEncoding positionEncoding;
 
-        // We assume that the channels come in order so that we know when we've got all the data for a given batch of samples.
         struct PosSample {
             int32_t timestamp = 0;
             uint16_t xy_etc[8] = {}; // we only use the first 6 elements, with the last two just padding
         };
         static_assert(sizeof(PosSample) == 4+8*2, "PosSample should be laid out in memory as 4+8*2 bytes.");
-        std::vector<PosSample> posSamplesBuffer;
+        PositionAssembler positionAssembler;
+        void writePositionChannel(int channel, const float* data, const double* timestamps, int size);
 
         std::string basePath;
         int timingNodeId = -1;
         std::shared_ptr<Timing::Session> timingSession;
-        Timing::Snapshot timingSnapshot;
         bool filesOpen = false;
         bool receivedRecordingData = false;
         bool recordingFailed = false;
         std::string timingError;
-        std::string timingHeaderSignature;
         std::deque<std::function<void()>> pendingWrites;
         size_t pendingBytes = 0;
         static constexpr size_t maximumPendingBytes = 256 * 1024 * 1024;
 
         void registerTiming(int experimentNumber, int recordingNumber);
         bool flushPendingWrites();
+        template <class Write> bool writeImmediately(Write&& write) {
+            if (!flushPendingWrites()) return false;
+            try { write(); }
+            catch (const std::exception& error) { failRecording(error.what()); }
+            return true;
+        }
         bool reservePending(size_t bytes);
         void failRecording(const std::string& message);
         void openOutputFiles();
+        void announceTimingWarnings();
         void updateTimingHeaders();
         void writeTimingMetadata(bool complete);
         void addTimingHeaders(LTXFile& file);

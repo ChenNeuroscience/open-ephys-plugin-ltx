@@ -47,7 +47,7 @@ extern "C" EXPORT void getLibInfo(Plugin::LibraryInfo* info)
 	The GUI refuses to load plugins with mismatched API versions */
 	info->apiVersion = PLUGIN_API_VER;
 	info->name = "LTX Format";
-	info->libVersion = "1.1.0";  // if updating this, also update the "created_by" header value in LTXFile.cpp
+	info->libVersion = "1.1.1";  // if updating this, also update the "created_by" header value in LTXFile.cpp
 	info->numPlugins = NUM_PLUGINS;
 }
 
