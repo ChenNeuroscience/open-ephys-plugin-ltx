@@ -1,3 +1,12 @@
+
+> [!WARNING]
+> # NO LONGER MAINTAINED
+> we use [ephys-rs](https://github.com/ChenNeuroscience/ephys-rs) instead
+
+
+
+---
+
 # Open Ephys (v1*) Plugin - LTX Record Engine
 
 *Currently this requires the [Windows fork of v1.0.1 OE, release d728c1b2a](https://github.com/ChenNeuroscience/open-ephys-main/releases/tag/d728c1b2a). The startup diagnostics below use that build's existing timing messages; it does not require a GUI modification.
